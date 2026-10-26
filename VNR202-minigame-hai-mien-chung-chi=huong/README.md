@@ -27,11 +27,11 @@ cp .env.example .env.local
 3. Điền giá trị Supabase thực tế:
 
 ```env
-VITE_SUPABASE_URL=https://your-project.supabase.co
-VITE_SUPABASE_ANON_KEY=your-anon-key
+SUPABASE_URL=https://your-project.supabase.co
+SUPABASE_ANON_KEY=your-publishable-or-anon-key
 ```
 
-> Không được commit `service_role` key, secret hay bất kỳ mã bí mật nào vào repository.
+> Vite chỉ nhúng chính xác `SUPABASE_URL` và `SUPABASE_ANON_KEY`; không dùng hoặc đưa `service_role` key vào cấu hình frontend.
 
 ## Chạy local
 
