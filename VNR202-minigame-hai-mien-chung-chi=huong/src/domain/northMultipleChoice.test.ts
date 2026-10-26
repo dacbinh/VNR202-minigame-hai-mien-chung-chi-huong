@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import {
   createNorthGameState,
+  isNorthOptionCorrect,
   transitionNorthGame,
   validateMultipleChoiceQuestions,
   type MultipleChoiceQuestion,
@@ -69,16 +70,18 @@ describe('North multiple-choice state machine', () => {
   it('accepts one valid answer per player for the active question', () => {
     const active = startGame()
     const submitted = transitionNorthGame(active, {
-      type: 'SUBMIT_ANSWER', questionId: 'north-1', optionId: 'a', requestId: 'answer-1',
+      type: 'SUBMIT_ANSWER', questionId: 'north-1', optionId: 'a', requestId: 'answer-1', isCorrect: true,
     }, player)
     const duplicateAnswer = transitionNorthGame(submitted, {
-      type: 'SUBMIT_ANSWER', questionId: 'north-1', optionId: 'b', requestId: 'answer-2',
+      type: 'SUBMIT_ANSWER', questionId: 'north-1', optionId: 'b', requestId: 'answer-2', isCorrect: false,
     }, player)
     const duplicateRequest = transitionNorthGame(submitted, {
-      type: 'SUBMIT_ANSWER', questionId: 'north-1', optionId: 'a', requestId: 'answer-1',
+      type: 'SUBMIT_ANSWER', questionId: 'north-1', optionId: 'a', requestId: 'answer-1', isCorrect: true,
     }, { role: 'player', id: 'player-2' })
 
     expect(submitted.context.answers).toHaveLength(1)
+    expect(submitted.context.answers[0]?.pointsAwarded).toBe(1)
+    expect(submitted.context.scores['player-1']).toBe(1)
     expect(duplicateAnswer).toBe(submitted)
     expect(duplicateRequest).toBe(submitted)
   })
@@ -86,13 +89,13 @@ describe('North multiple-choice state machine', () => {
   it('rejects stale questions, invalid choices, and non-participants', () => {
     const active = startGame()
     const stale = transitionNorthGame(active, {
-      type: 'SUBMIT_ANSWER', questionId: 'north-2', optionId: 'a', requestId: 'stale',
+      type: 'SUBMIT_ANSWER', questionId: 'north-2', optionId: 'a', requestId: 'stale', isCorrect: true,
     }, player)
     const invalidOption = transitionNorthGame(active, {
-      type: 'SUBMIT_ANSWER', questionId: 'north-1', optionId: 'missing', requestId: 'bad-option',
+      type: 'SUBMIT_ANSWER', questionId: 'north-1', optionId: 'missing', requestId: 'bad-option', isCorrect: true,
     }, player)
     const stranger = transitionNorthGame(active, {
-      type: 'SUBMIT_ANSWER', questionId: 'north-1', optionId: 'a', requestId: 'stranger',
+      type: 'SUBMIT_ANSWER', questionId: 'north-1', optionId: 'a', requestId: 'stranger', isCorrect: true,
     }, { role: 'player', id: 'not-in-game' })
 
     expect(stale).toBe(active)
@@ -103,11 +106,11 @@ describe('North multiple-choice state machine', () => {
   it('reveals the admin-selected answer and locks submissions', () => {
     const active = startGame()
     const answered = transitionNorthGame(active, {
-      type: 'SUBMIT_ANSWER', questionId: 'north-1', optionId: 'a', requestId: 'answer',
+      type: 'SUBMIT_ANSWER', questionId: 'north-1', optionId: 'a', requestId: 'answer', isCorrect: true,
     }, player)
     const revealed = transitionNorthGame(answered, { type: 'ADMIN_REVEAL_ANSWER', correctOptionId: 'a' }, admin)
     const lateAnswer = transitionNorthGame(revealed, {
-      type: 'SUBMIT_ANSWER', questionId: 'north-1', optionId: 'b', requestId: 'late',
+      type: 'SUBMIT_ANSWER', questionId: 'north-1', optionId: 'b', requestId: 'late', isCorrect: false,
     }, { role: 'player', id: 'player-2' })
 
     expect(revealed.status).toBe('answer_revealed')
@@ -165,30 +168,19 @@ describe('North multiple-choice state machine', () => {
     }
   })
 
-  it('allows admin point adjustments once and rejects invalid adjustments', () => {
+  it('awards no points for an incorrect submitted answer', () => {
     const active = startGame()
-    const granted = transitionNorthGame(active, {
-      type: 'ADMIN_GRANT_POINTS', targetId: 'player-1', amount: 3, reason: 'Thưởng', requestId: 'grant-1',
-    }, admin)
-    const duplicateGrant = transitionNorthGame(granted, {
-      type: 'ADMIN_GRANT_POINTS', targetId: 'player-1', amount: 3, reason: 'Thưởng', requestId: 'grant-1',
-    }, admin)
-    const deducted = transitionNorthGame(granted, {
-      type: 'ADMIN_DEDUCT_POINTS', targetId: 'player-1', amount: 3, reason: 'Điều chỉnh', requestId: 'deduct-1',
-    }, admin)
-    const overDeducted = transitionNorthGame(deducted, {
-      type: 'ADMIN_DEDUCT_POINTS', targetId: 'player-1', amount: 1, reason: 'Quá điểm', requestId: 'deduct-2',
-    }, admin)
-    const unauthorized = transitionNorthGame(active, {
-      type: 'ADMIN_GRANT_POINTS', targetId: 'player-1', amount: 3, reason: 'Thưởng', requestId: 'grant-2',
+    const incorrect = transitionNorthGame(active, {
+      type: 'SUBMIT_ANSWER',
+      questionId: 'north-1',
+      optionId: 'b',
+      requestId: 'wrong-answer',
+      isCorrect: false,
     }, player)
 
-    expect(granted.context.scores['player-1']).toBe(3)
-    expect(granted.context.pointAdjustments).toHaveLength(1)
-    expect(duplicateGrant).toBe(granted)
-    expect(deducted.context.scores['player-1']).toBe(0)
-    expect(overDeducted).toBe(deducted)
-    expect(unauthorized).toBe(active)
+    expect(incorrect.context.answers[0]?.correct).toBe(false)
+    expect(incorrect.context.answers[0]?.pointsAwarded).toBe(0)
+    expect(incorrect.context.scores['player-1']).toBe(0)
   })
 
   it('restarts completed games as a clean lobby', () => {
@@ -199,5 +191,12 @@ describe('North multiple-choice state machine', () => {
     expect(restarted.status).toBe('lobby')
     expect(restarted.context.answers).toEqual([])
     expect(restarted.context.scores['player-1']).toBe(0)
+  })
+})
+
+describe('isNorthOptionCorrect', () => {
+  it('ignores case and surrounding spaces while preserving Vietnamese diacritics', () => {
+    expect(isNorthOptionCorrect('  HÀ NỘI ', 'Hà Nội')).toBe(true)
+    expect(isNorthOptionCorrect('Ha Noi', 'Hà Nội')).toBe(false)
   })
 })

@@ -3,6 +3,7 @@ import type { RealtimeChannel } from '@supabase/supabase-js'
 import { getTeamMemberCount, type LobbyMember, type LobbyTeam } from './domain/lobbyRules'
 import {
   createNorthGameState,
+  isNorthOptionCorrect,
   transitionNorthGame,
   type MultipleChoiceQuestion,
   type NorthGameActor,
@@ -15,6 +16,7 @@ import {
   createHostRoom,
   getRoomServiceErrorMessage,
   loadQuestionBank,
+  loadQuestionAnswerKeys,
   sendRoomEvent,
   type BankQuestion,
   type RoomMessage,
@@ -69,12 +71,9 @@ function App() {
   const [players, setPlayers] = useState<LobbyMember[]>([])
   const [sessionStatus, setSessionStatus] = useState<SessionStatus>('waiting')
   const [questions, setQuestions] = useState<BankQuestion[]>([])
+  const [answerKeys, setAnswerKeys] = useState<Record<string, string>>({})
   const [northGame, setNorthGame] = useState<NorthGameState | null>(null)
   const [selectedOptionId, setSelectedOptionId] = useState('')
-  const [revealOptionId, setRevealOptionId] = useState('')
-  const [scoreTargetId, setScoreTargetId] = useState('')
-  const [scoreAmount, setScoreAmount] = useState(1)
-  const [scoreReason, setScoreReason] = useState('')
   const [clockNow, setClockNow] = useState(() => Date.now())
   const hostChannelRef = useRef<RealtimeChannel | null>(null)
   const playerChannelRef = useRef<RealtimeChannel | null>(null)
@@ -83,6 +82,7 @@ function App() {
   const questionNumberRef = useRef(1)
   const questionsRef = useRef<BankQuestion[]>([])
   const northGameRef = useRef<NorthGameState | null>(null)
+  const answerKeysRef = useRef<Record<string, string>>({})
   const pendingJoinRef = useRef<{
     requestId: string
     resolve: () => void
@@ -108,10 +108,20 @@ function App() {
     const timer = window.setInterval(() => {
       const currentGame = northGameRef.current
       if (!currentGame) return
-      const nextGame = transitionNorthGame(currentGame, { type: 'TICK', now: Date.now() }, adminActor)
+      const currentQuestion = currentGame.status === 'question_active'
+        ? currentGame.context.questions[currentGame.context.currentIndex]
+        : undefined
+      const correctAnswer = currentQuestion ? answerKeysRef.current[currentQuestion.id] : undefined
+      const correctOptionId = currentQuestion && correctAnswer
+        ? currentQuestion.options.find((option) => isNorthOptionCorrect(option.text, correctAnswer))?.id
+        : undefined
+      const nextGame = transitionNorthGame(currentGame, {
+        type: 'TICK',
+        now: Date.now(),
+        correctOptionId,
+      }, adminActor)
       if (nextGame === currentGame) return
 
-      if (nextGame.context.currentIndex !== currentGame.context.currentIndex) setRevealOptionId('')
       northGameRef.current = nextGame
       setNorthGame(nextGame)
       const nextStatus = nextGame.status === 'question_active' ? 'active' : 'waiting'
@@ -167,8 +177,18 @@ function App() {
   }
 
   const startNorthGame = () => {
+    const northQuestions = getNorthMultipleChoiceQuestions(questionsRef.current)
+    const missingAnswer = northQuestions.some((question) => {
+      const answer = answerKeysRef.current[question.id]
+      return !answer || !question.options.some((option) => isNorthOptionCorrect(option.text, answer))
+    })
+    if (missingAnswer) {
+      setAdminError('Thiếu đáp án hợp lệ trong ngân hàng cho ít nhất một câu Miền Bắc.')
+      return
+    }
+
     const game = createNorthGameState(
-      getNorthMultipleChoiceQuestions(questionsRef.current),
+      northQuestions,
       playersRef.current
         .filter((player) => player.team === 'north')
         .map((player) => player.profileId),
@@ -205,7 +225,6 @@ function App() {
     const nextGame = transitionNorthGame(currentGame, event, actor)
     if (nextGame === currentGame) return
 
-    if (nextGame.context.currentIndex !== currentGame.context.currentIndex) setRevealOptionId('')
     northGameRef.current = nextGame
     setNorthGame(nextGame)
     const nextSessionStatus = nextGame.status === 'question_active'
@@ -230,11 +249,24 @@ function App() {
     if (message.type === 'north-answer' && message.playerId && message.questionId
       && message.optionId && message.requestId
       && playersRef.current.some((player) => player.profileId === message.playerId)) {
+      const currentGame = northGameRef.current
+      const question = currentGame?.status === 'question_active'
+        ? currentGame.context.questions[currentGame.context.currentIndex]
+        : undefined
+      const selectedOption = question?.options.find((option) => option.id === message.optionId)
+      const answerKey = question ? answerKeysRef.current[question.id] : undefined
+
+      if (!question || !selectedOption || !answerKey) {
+        setAdminError('Không thể kiểm tra đáp án; hãy kiểm tra dữ liệu ngân hàng Miền Bắc.')
+        return
+      }
+
       dispatchNorthGame({
         type: 'SUBMIT_ANSWER',
         questionId: message.questionId,
         optionId: message.optionId,
         requestId: message.requestId,
+        isCorrect: isNorthOptionCorrect(selectedOption.text, answerKey),
       }, { role: 'player', id: message.playerId })
       return
     }
@@ -252,18 +284,6 @@ function App() {
         requestId: message.requestId,
         errorMessage: 'Trận đã bắt đầu, chủ phòng không nhận thêm người chơi.',
       })
-      return
-    }
-
-    if (message.type === 'north-answer' && message.playerId && message.questionId
-      && message.optionId && message.requestId
-      && playersRef.current.some((player) => player.profileId === message.playerId)) {
-      dispatchNorthGame({
-        type: 'SUBMIT_ANSWER',
-        questionId: message.questionId,
-        optionId: message.optionId,
-        requestId: message.requestId,
-      }, { role: 'player', id: message.playerId })
       return
     }
 
@@ -397,6 +417,13 @@ function App() {
       playerChannelRef.current = null
 
       const bankQuestions = await loadQuestionBank()
+      const northQuestionIds = getNorthMultipleChoiceQuestions(bankQuestions).map((question) => question.id)
+      const answerKeys = await loadQuestionAnswerKeys(northQuestionIds)
+      const answerKeyMap = Object.fromEntries(
+        answerKeys.map((answer) => [answer.question_id, answer.correct_answer]),
+      )
+      answerKeysRef.current = answerKeyMap
+      setAnswerKeys(answerKeyMap)
       questionsRef.current = bankQuestions
       setQuestions(bankQuestions)
       northGameRef.current = null
@@ -423,6 +450,11 @@ function App() {
   const northCount = getTeamMemberCount(players, 'north')
   const southCount = getTeamMemberCount(players, 'south')
   const currentNorthQuestion = northGame?.context.questions[northGame.context.currentIndex]
+  const correctNorthOptionId = currentNorthQuestion
+    ? currentNorthQuestion.options.find((option) =>
+        isNorthOptionCorrect(option.text, answerKeys[currentNorthQuestion.id] ?? ''),
+      )?.id
+    : undefined
   const currentNorthResolution = northGame?.context.resolutions.find(
     (resolution) => resolution.questionId === currentNorthQuestion?.id,
   )
@@ -599,7 +631,11 @@ function App() {
                       ))}
                     </div>
                     {playerNorthAnswer ? (
-                      <p className="lobby-status ready">Đã ghi nhận câu trả lời của bạn.</p>
+                      <p className={playerNorthAnswer.correct ? 'lobby-status ready' : 'lobby-status waiting'}>
+                        {playerNorthAnswer.correct
+                          ? `Chính xác · +${playerNorthAnswer.pointsAwarded} điểm.`
+                          : 'Chưa chính xác · 0 điểm.'}
+                      </p>
                     ) : (
                       <button
                         className="primary-button"
@@ -744,8 +780,10 @@ function App() {
                       const option = currentNorthQuestion.options.find((item) => item.id === answer.selectedOptionId)
                       return (
                         <div className="player-summary" key={answer.playerId}>
-                          <span>{answeringPlayer?.displayName ?? 'Người chơi'} · {option?.label ?? '—'}</span>
-                          <strong>{northGame.context.scores[answer.playerId] ?? 0} điểm</strong>
+                          <span>
+                            {answeringPlayer?.displayName ?? 'Người chơi'} · {option?.label ?? '—'} · {answer.correct ? 'Đúng' : 'Sai'}
+                          </span>
+                          <strong>+{answer.pointsAwarded} · Tổng {northGame.context.scores[answer.playerId] ?? 0} điểm</strong>
                         </div>
                       )
                     })}
@@ -793,78 +831,21 @@ function App() {
               {(northGame?.status === 'question_active'
                 || northGame?.status === 'answer_revealed' && currentNorthResolution?.reason === 'timeout') && currentNorthQuestion && (
                 <div className="admin-tools">
-                  <label>
-                    <span>Đáp án do chủ phòng xác nhận</span>
-                    <select value={revealOptionId} onChange={(event) => setRevealOptionId(event.target.value)}>
-                      <option value="">Chọn đáp án</option>
-                      {currentNorthQuestion.options.map((option) => (
-                        <option key={option.id} value={option.id}>{option.label}. {option.text}</option>
-                      ))}
-                    </select>
-                  </label>
                   <button
                     className="secondary-button"
-                    disabled={!revealOptionId}
-                    onClick={() => dispatchNorthGame({ type: 'ADMIN_REVEAL_ANSWER', correctOptionId: revealOptionId })}
+                    disabled={!correctNorthOptionId}
+                    onClick={() => correctNorthOptionId && dispatchNorthGame({
+                      type: 'ADMIN_REVEAL_ANSWER',
+                      correctOptionId: correctNorthOptionId,
+                    })}
                     type="button"
                   >
-                    Công bố đáp án
+                    Công bố đáp án từ ngân hàng
                   </button>
                 </div>
               )}
-              {northGame && !['lobby', 'completed', 'error'].includes(northGame.status) && (
-                <div className="admin-tools">
-                  <label>
-                    <span>Người nhận điểm</span>
-                    <select value={scoreTargetId} onChange={(event) => setScoreTargetId(event.target.value)}>
-                      <option value="">Chọn người chơi</option>
-                      {players.filter((player) => player.team === 'north').map((player) => (
-                        <option key={player.profileId} value={player.profileId}>{player.displayName}</option>
-                      ))}
-                    </select>
-                  </label>
-                  <label>
-                    <span>Số điểm</span>
-                    <input min="1" onChange={(event) => setScoreAmount(Number(event.target.value))} type="number" value={scoreAmount} />
-                  </label>
-                  <label>
-                    <span>Lý do</span>
-                    <input onChange={(event) => setScoreReason(event.target.value)} value={scoreReason} />
-                  </label>
-                  <div className="action-row host-actions">
-                    <button
-                      className="secondary-button"
-                      disabled={!scoreTargetId || !scoreReason.trim() || scoreAmount <= 0}
-                      onClick={() => {
-                        dispatchNorthGame({
-                          type: 'ADMIN_GRANT_POINTS', targetId: scoreTargetId, amount: scoreAmount,
-                          reason: scoreReason, requestId: globalThis.crypto.randomUUID(),
-                        })
-                        setScoreReason('')
-                      }}
-                      type="button"
-                    >
-                      Cộng điểm
-                    </button>
-                    <button
-                      className="secondary-button"
-                      disabled={!scoreTargetId || !scoreReason.trim() || scoreAmount <= 0}
-                      onClick={() => {
-                        dispatchNorthGame({
-                          type: 'ADMIN_DEDUCT_POINTS', targetId: scoreTargetId, amount: scoreAmount,
-                          reason: scoreReason, requestId: globalThis.crypto.randomUUID(),
-                        })
-                        setScoreReason('')
-                      }}
-                      type="button"
-                    >
-                      Trừ điểm
-                    </button>
-                  </div>
-                </div>
-              )}
               <p className="control-note">
-                Câu trả lời do người chơi gửi; chủ phòng xác nhận đáp án và điều chỉnh điểm.
+                Đáp án được kiểm tra tự động; điểm cộng ngay khi người chơi gửi câu trả lời.
               </p>
             </section>
           </div>

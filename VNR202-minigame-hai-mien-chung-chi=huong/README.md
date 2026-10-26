@@ -8,7 +8,7 @@
 - Miền Bắc có điểm hỗ trợ và cộng thưởng vào quỹ của Miền Nam.
 - Chủ phòng tạo mã phòng và giữ trạng thái trận trong trình duyệt của mình.
 - Người chơi xác thực mã bằng cách kết nối tới kênh Realtime đang mở, sau đó chọn đội.
-- Câu hỏi đang mở được tải từ `question_bank`; đáp án đúng nằm riêng trong `question_bank_answers` và không được gửi đến client.
+- Câu hỏi và đáp án được tải từ `question_bank` và `question_bank_answers` vào trình duyệt chủ phòng. Chủ phòng kiểm tra đáp án ngay khi nhận bài; FSM cộng điểm tự động và chỉ gửi kết quả/điểm qua Realtime.
 
 ## Cài đặt nhanh
 
@@ -49,7 +49,9 @@ supabase db push
 ```
 
 2. Bật Realtime trong Supabase. Không cần bật đăng nhập ẩn danh cho luồng phòng hiện tại.
-3. Thêm câu hỏi vào `question_bank` và đặt `is_active` thành `true` để câu hỏi được tải vào trận. Danh sách lựa chọn lưu trong `choices`; đáp án giữ trong `question_bank_answers`. Không thêm đáp án vào payload công khai.
+3. Thêm câu hỏi vào `question_bank` và đặt `is_active` thành `true`; thêm đáp án khớp chính xác với nội dung một lựa chọn vào `question_bank_answers`. Cấu hình `duration_seconds` và `points` cho câu hỏi.
+
+**Chế độ demo không an toàn cho phát hành công khai:** migration `20261026_0006_demo_answer_key_access.sql` cho phép browser client đọc đáp án để hỗ trợ host không đăng nhập. Không broadcast answer key, nhưng người chơi có thể tự đọc bảng đáp án bằng publishable key. Trước khi dùng cạnh tranh/thật, thay bước chấm đáp án này bằng Edge Function/RPC được bảo vệ bằng xác thực admin.
 
 Phòng và roster chỉ tồn tại khi trang chủ phòng còn kết nối. Nếu chủ phòng tải lại trang hoặc đóng trình duyệt, phiên đang chạy kết thúc; database không lưu mã phòng, người chơi, điểm hoặc trạng thái trận. Kênh dùng mã phòng làm tên, nên mã không phải cơ chế xác thực cho dữ liệu nhạy cảm.
 
@@ -72,5 +74,5 @@ npm run build
 ## Ghi chú
 
 - Chưa có câu hỏi mẫu hoặc nội dung được seed; ngân hàng rỗng sẽ khóa nút bắt đầu.
-- Điểm, tiến độ, chấm đáp án và lưu trạng thái qua lần tải lại chưa nằm trong checkpoint này.
+- Điểm và trạng thái chỉ tồn tại trong trình duyệt chủ phòng; không lưu qua lần tải lại.
 - Các trạng thái UI được giữ bằng tiếng Việt.

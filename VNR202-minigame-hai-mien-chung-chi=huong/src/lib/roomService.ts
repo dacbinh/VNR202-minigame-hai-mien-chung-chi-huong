@@ -24,8 +24,12 @@ export const getRoomServiceErrorMessage = (error: unknown, fallback: string) => 
         .join(' ')
   const normalizedMessage = message.toLowerCase()
 
+  if (normalizedMessage.includes('question_bank_answers')) {
+    return 'Không thể tải đáp án cho chế độ demo. Hãy áp dụng migration 20261026_0006_demo_answer_key_access.sql.'
+  }
+
   if (normalizedMessage.includes('question_bank') || normalizedMessage.includes('permission denied') || normalizedMessage.includes('row-level security')) {
-    return 'Không thể tải ngân hàng câu hỏi. Hãy áp dụng migration question_bank trong Supabase và cấp quyền đọc câu hỏi đang mở.'
+    return 'Không thể tải ngân hàng câu hỏi. Hãy áp dụng migrations question_bank trong Supabase và cấp quyền đọc câu hỏi đang mở.'
   }
 
   if (normalizedMessage.includes('room_code_not_found')) {
@@ -170,4 +174,21 @@ export const loadQuestionBank = async (): Promise<BankQuestion[]> => {
 
   if (error) throw error
   return (data ?? []) as BankQuestion[]
+}
+
+export type BankAnswerKey = {
+  question_id: string
+  correct_answer: string
+}
+
+export const loadQuestionAnswerKeys = async (questionIds: string[]): Promise<BankAnswerKey[]> => {
+  if (questionIds.length === 0) return []
+
+  const { data, error } = await getClient()
+    .from('question_bank_answers')
+    .select('question_id, correct_answer')
+    .in('question_id', questionIds)
+
+  if (error) throw error
+  return data ?? []
 }

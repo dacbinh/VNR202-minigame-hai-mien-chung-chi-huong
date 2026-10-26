@@ -1,3 +1,5 @@
+import { normalizeAnswer } from './gameRules'
+
 export interface MultipleChoiceOption {
   id: string
   label: string
@@ -38,15 +40,6 @@ export interface QuestionResolution {
   resolvedAt: number
 }
 
-export interface PointAdjustment {
-  actorId: string
-  targetId: string
-  amount: number
-  reason: string
-  requestId: string
-  createdAt: number
-}
-
 export interface NorthGameContext {
   gameId: string
   questions: MultipleChoiceQuestion[]
@@ -54,7 +47,6 @@ export interface NorthGameContext {
   currentIndex: number
   answers: AnswerRecord[]
   resolutions: QuestionResolution[]
-  pointAdjustments: PointAdjustment[]
   scores: Record<string, number>
   processedRequestIds: string[]
   questionDeadline: number | null
@@ -80,17 +72,15 @@ export type NorthGameState =
 
 export type NorthGameEvent =
   | { type: 'ADMIN_START' }
-  | { type: 'SUBMIT_ANSWER'; questionId: string; optionId: string; requestId: string }
+  | { type: 'SUBMIT_ANSWER'; questionId: string; optionId: string; requestId: string; isCorrect: boolean }
   | { type: 'ADMIN_REVEAL_ANSWER'; correctOptionId: string }
   | { type: 'ADMIN_SKIP_QUESTION'; reason?: string }
   | { type: 'ADMIN_PAUSE' }
   | { type: 'ADMIN_RESUME' }
   | { type: 'ADMIN_SKIP_INTERMISSION' }
-  | { type: 'ADMIN_GRANT_POINTS'; targetId: string; amount: number; reason: string; requestId: string }
-  | { type: 'ADMIN_DEDUCT_POINTS'; targetId: string; amount: number; reason: string; requestId: string }
   | { type: 'ADMIN_END_GAME'; reason: string }
   | { type: 'ADMIN_RESTART' }
-  | { type: 'TICK'; now: number }
+  | { type: 'TICK'; now: number; correctOptionId?: string }
 
 export type NorthGameActor =
   | { role: 'admin'; id: string }
@@ -150,7 +140,6 @@ const makeContext = (
   currentIndex: 0,
   answers: [],
   resolutions: [],
-  pointAdjustments: [],
   scores: Object.fromEntries(participantIds.map((playerId) => [playerId, 0])),
   processedRequestIds: [],
   questionDeadline: null,
@@ -258,6 +247,7 @@ export const transitionNorthGame = (
         || state.context.processedRequestIds.includes(event.requestId)
         || !question.options.some((option) => option.id === event.optionId)) return state
 
+      const pointsAwarded = event.isCorrect ? question.points : 0
       return {
         status: 'question_active',
         context: {
@@ -266,10 +256,14 @@ export const transitionNorthGame = (
             playerId: actor.id,
             questionId: question.id,
             selectedOptionId: event.optionId,
-            correct: null,
+            correct: event.isCorrect,
             submittedAt: now,
-            pointsAwarded: 0,
+            pointsAwarded,
           }],
+          scores: {
+            ...state.context.scores,
+            [actor.id]: (state.context.scores[actor.id] ?? 0) + pointsAwarded,
+          },
           processedRequestIds: [...state.context.processedRequestIds, event.requestId],
         },
       }
@@ -331,35 +325,6 @@ export const transitionNorthGame = (
         ? advanceToNextQuestion(state.context, now)
         : state
 
-    case 'ADMIN_GRANT_POINTS':
-    case 'ADMIN_DEDUCT_POINTS': {
-      if (!isAdmin(actor) || state.status === 'lobby' || state.status === 'completed' || state.status === 'error') return state
-      if (!state.context.participantIds.includes(event.targetId)
-        || !Number.isInteger(event.amount) || event.amount <= 0
-        || !event.reason.trim() || !event.requestId
-        || state.context.processedRequestIds.includes(event.requestId)) return state
-
-      const amount = event.type === 'ADMIN_GRANT_POINTS' ? event.amount : -event.amount
-      if ((state.context.scores[event.targetId] ?? 0) + amount < 0) return state
-      return {
-        status: state.status,
-        context: {
-          ...state.context,
-          scores: { ...state.context.scores, [event.targetId]: (state.context.scores[event.targetId] ?? 0) + amount },
-          pointAdjustments: [...state.context.pointAdjustments, {
-            actorId: actor.id,
-            targetId: event.targetId,
-            amount,
-            reason: event.reason.trim(),
-            requestId: event.requestId,
-            createdAt: now,
-          }],
-          processedRequestIds: [...state.context.processedRequestIds, event.requestId],
-        },
-        ...('pausedFrom' in state ? { pausedFrom: state.pausedFrom, pausedRemainingMs: state.pausedRemainingMs } : {}),
-      } as NorthGameState
-    }
-
     case 'ADMIN_END_GAME':
       return isAdmin(actor) && state.status !== 'completed' && state.status !== 'error'
         ? { status: 'completed', context: state.context }
@@ -377,7 +342,11 @@ export const transitionNorthGame = (
     case 'TICK': {
       if (state.status === 'question_active' && state.context.questionDeadline !== null
         && now >= state.context.questionDeadline) {
-        return revealAnswer(state.context, null, 'timeout', now)
+        const question = state.context.questions[state.context.currentIndex]
+        const correctOptionId = question?.options.some((option) => option.id === event.correctOptionId)
+          ? event.correctOptionId ?? null
+          : null
+        return revealAnswer(state.context, correctOptionId, 'timeout', now)
       }
       if (state.status === 'answer_revealed' && state.context.feedbackDeadline !== null
         && now >= state.context.feedbackDeadline) {
@@ -394,3 +363,13 @@ export const transitionNorthGame = (
       return state
   }
 }
+
+const optionAnswerNormalization = {
+  trim: true,
+  caseInsensitive: true,
+  collapseWhitespace: true,
+}
+
+export const isNorthOptionCorrect = (selectedText: string, correctAnswer: string) =>
+  normalizeAnswer(selectedText, optionAnswerNormalization)
+  === normalizeAnswer(correctAnswer, optionAnswerNormalization)
