@@ -1,75 +1,60 @@
-# React + TypeScript + Vite
+# Hợp sức Bắc - Nam
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+Ứng dụng demo frontend cho game quiz multiplayer theo checkpoint đã định nghĩa trong `ai_vibecode_game_spec.md`.
 
-Currently, two official plugins are available:
+## Mục tiêu
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+- Miền Nam có tiến độ trận, điểm chung và mở khóa câu hỏi.
+- Miền Bắc có điểm hỗ trợ và cộng thưởng vào quỹ của Miền Nam.
+- Admin có quyền quản lý phiên và điều kiện chiến thắng.
+- Supabase dùng cho dữ liệu thật, Realtime và RPC; frontend chỉ hiển thị trạng thái và không tự gán điểm.
 
-## React Compiler
+## Cài đặt nhanh
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+1. Cài đặt dependency:
 
-## Expanding the ESLint configuration
-
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
-
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
-
+```bash
+npm install
 ```
 
-You can also install [eslint-plugin-react-x](https://npmx.dev/package/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://npmx.dev/package/eslint-plugin-react-dom) for React-specific lint rules:
+2. Tạo file `.env.local` dựa trên `.env.example`:
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
-
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
-
+```bash
+cp .env.example .env.local
 ```
+
+3. Điền giá trị Supabase thực tế:
+
+```env
+VITE_SUPABASE_URL=https://your-project.supabase.co
+VITE_SUPABASE_ANON_KEY=your-anon-key
+```
+
+> Không được commit `service_role` key, secret hay bất kỳ mã bí mật nào vào repository.
+
+## Chạy local
+
+```bash
+npm run dev
+```
+
+## Kiểm tra
+
+```bash
+npm test
+npm run lint
+npm run build
+```
+
+## Cấu trúc chính
+
+- `src/domain`: logic game thuần, không phụ thuộc UI.
+- `src/lib/supabase.ts`: cấu hình client Supabase an toàn.
+- `src/App.tsx`: shell giao diện và màn hình mock/demo.
+- `supabase/migrations`: schema và quy tắc database.
+
+## Ghi chú
+
+- Các màn hình hiện tại đang là demo local và chỉ dùng placeholder khi chưa có dữ liệu thật.
+- Dữ liệu câu hỏi, đáp án và hành vi multiplayer thực thi được ưu tiên qua Supabase/PostgreSQL function thay vì client-side fake logic.
+- Các trạng thái UI được giữ bằng tiếng Việt để phù hợp với yêu cầu giao diện người dùng.
