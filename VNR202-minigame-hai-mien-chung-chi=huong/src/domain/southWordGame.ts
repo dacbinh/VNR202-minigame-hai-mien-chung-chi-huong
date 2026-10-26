@@ -1,9 +1,8 @@
-import { normalizeAnswer } from './gameRules'
-
 export interface WordQuestion {
   id: string
   prompt: string
   expectedAnswer: string
+  answerPattern?: number[]
 }
 
 export interface GameResult {
@@ -33,20 +32,26 @@ export type GameEvent =
   | { type: 'NEXT_QUESTION' }
   | { type: 'RESTART' }
 
-const wordAnswerNormalization = {
-  trim: true,
-  caseInsensitive: true,
-  collapseWhitespace: false,
-}
+const normalizeWordAnswer = (value: string) => value
+  .normalize('NFD')
+  .replace(/\p{M}/gu, '')
+  .replace(/[đĐ]/g, 'd')
+  .trim()
+  .replace(/\s+/g, ' ')
+  .toLocaleLowerCase('vi-VN')
+
+export const getWordAnswerPattern = (answer: string) => normalizeWordAnswer(answer)
+  .split(' ')
+  .filter(Boolean)
+  .map((word) => Array.from(word).length)
 
 export const isWordAnswerCorrect = (submitted: string, expected: string) =>
-  normalizeAnswer(submitted, wordAnswerNormalization)
-  === normalizeAnswer(expected, wordAnswerNormalization)
+  normalizeWordAnswer(submitted) === normalizeWordAnswer(expected)
 
 const hasValidQuestionData = (question: WordQuestion) =>
   question.id.trim().length > 0
   && question.prompt.trim().length > 0
-  && normalizeAnswer(question.expectedAnswer, wordAnswerNormalization).length > 0
+  && normalizeWordAnswer(question.expectedAnswer).length > 0
 
 export const createWordGameState = (questions: WordQuestion[]): GameState => {
   const context: GameContext = {
@@ -93,7 +98,7 @@ export const transitionWordGame = (state: GameState, event: GameEvent): GameStat
         return { status: 'error', context: state.context, message: 'Không tìm thấy câu hỏi hiện tại.' }
       }
 
-      if (normalizeAnswer(state.context.draftAnswer, wordAnswerNormalization) === '') return state
+      if (normalizeWordAnswer(state.context.draftAnswer) === '') return state
 
       const result: GameResult = {
         questionId: question.id,

@@ -4,6 +4,7 @@ import {
   calculateWordGameCompletion,
   calculateWordGameScore,
   createWordGameState,
+  getWordAnswerPattern,
   transitionWordGame,
   type GameState,
   type WordQuestion,
@@ -68,14 +69,34 @@ describe('transitionWordGame', () => {
     }
   })
 
-  it('preserves diacritics and records an incorrect result without a penalty', () => {
+  it('accepts lowercase Vietnamese answers', () => {
+    const state = answer(startGame(), 'hà nội')
+
+    expect(state.status).toBe('feedback')
+    if (state.status === 'feedback') {
+      expect(state.lastResult.correct).toBe(true)
+    }
+  })
+
+  it('accepts Vietnamese answers without diacritics', () => {
     const state = answer(startGame(), 'Ha Noi')
 
     expect(state.status).toBe('feedback')
     if (state.status === 'feedback') {
-      expect(state.lastResult.correct).toBe(false)
-      expect(calculateWordGameScore(state.context.results)).toBe(0)
+      expect(state.lastResult.correct).toBe(true)
+      expect(calculateWordGameScore(state.context.results)).toBe(1)
     }
+  })
+
+  it('accepts Dong Khoi for Đồng Khởi and creates one slot per letter', () => {
+    const state = answer(
+      startGame([{ id: 'q1', prompt: 'Điền địa danh', expectedAnswer: 'Đồng Khởi' }]),
+      'dong khoi',
+    )
+
+    expect(state.status).toBe('feedback')
+    if (state.status === 'feedback') expect(state.lastResult.correct).toBe(true)
+    expect(getWordAnswerPattern('Đồng Khởi')).toEqual([4, 4])
   })
 
   it('allows only one submission per question and locks answer editing in feedback', () => {

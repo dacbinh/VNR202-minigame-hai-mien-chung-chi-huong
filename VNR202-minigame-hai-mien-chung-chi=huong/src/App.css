@@ -841,6 +841,31 @@ label input::placeholder {
   margin-top: 0.5rem;
 }
 
+.south-answer-inputs,
+.south-answer-input-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+}
+
+.south-answer-inputs {
+  align-items: center;
+  gap: 0.75rem;
+}
+
+label input.south-answer-symbol {
+  width: 2.6rem;
+  height: 3rem;
+  padding: 0.35rem;
+  text-align: center;
+  text-transform: lowercase;
+}
+
+label input.south-answer-symbol:focus-visible {
+  outline: 2px solid var(--color-jade);
+  outline-offset: 2px;
+}
+
 @media (max-width: 900px) {
   .mode-switch {
     margin-top: 0;

@@ -12,6 +12,7 @@ import {
 } from './domain/northMultipleChoice'
 import {
   createWordGameState,
+  getWordAnswerPattern,
   transitionWordGame,
   type GameState as SouthWordGameState,
   type WordQuestion,
@@ -42,6 +43,82 @@ const teamNames: Record<LobbyTeam, string> = {
 const adminActor: NorthGameActor = { role: 'admin', id: 'host' }
 const multipleChoiceLabels = ['A', 'B', 'C', 'D']
 
+type SouthAnswerInputProps = {
+  answerPattern: number[]
+  value: string
+  onChange: (answer: string) => void
+}
+
+const SouthAnswerInput = ({ answerPattern, value, onChange }: SouthAnswerInputProps) => {
+  const inputRefs = useRef<Array<HTMLInputElement | null>>([])
+  const characters = Array.from(value.normalize('NFC').replace(/\s+/g, ''))
+  const slotCount = answerPattern.reduce((total, wordLength) => total + wordLength, 0)
+
+  const updateCharacter = (slotIndex: number, rawValue: string) => {
+    const enteredCharacters = Array.from(rawValue.normalize('NFC'))
+      .filter((character) => !/\s/u.test(character))
+    const nextCharacters = Array.from({ length: slotCount }, (_, index) => characters[index] ?? '')
+
+    if (enteredCharacters.length === 0) {
+      nextCharacters[slotIndex] = ''
+    } else {
+      enteredCharacters.forEach((character, offset) => {
+        if (slotIndex + offset < slotCount) nextCharacters[slotIndex + offset] = character
+      })
+    }
+
+    let characterOffset = 0
+    const answer = answerPattern
+      .map((wordLength) => {
+        const word = nextCharacters.slice(characterOffset, characterOffset + wordLength).join('')
+        characterOffset += wordLength
+        return word
+      })
+      .join(' ')
+    onChange(answer)
+
+    const nextSlot = slotIndex + enteredCharacters.length
+    if (enteredCharacters.length > 0 && nextSlot < slotCount) inputRefs.current[nextSlot]?.focus()
+  }
+
+  let slotIndex = 0
+
+  return (
+    <div className="south-answer-inputs" role="group" aria-label="Nhập đáp án theo từng ký tự">
+      {answerPattern.map((wordLength, wordIndex) => {
+        const wordStart = slotIndex
+        slotIndex += wordLength
+
+        return (
+          <div className="south-answer-input-group" key={`${wordIndex}-${wordLength}`}>
+            {Array.from({ length: wordLength }, (_, characterIndex) => {
+              const currentSlot = wordStart + characterIndex
+
+              return (
+                <input
+                  aria-label={`Ký tự ${currentSlot + 1}`}
+                  autoCapitalize="none"
+                  autoComplete="off"
+                  className="south-answer-symbol"
+                  key={currentSlot}
+                  onChange={(event) => updateCharacter(currentSlot, event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Backspace' && !characters[currentSlot] && currentSlot > 0) {
+                      inputRefs.current[currentSlot - 1]?.focus()
+                    }
+                  }}
+                  ref={(element) => { inputRefs.current[currentSlot] = element }}
+                  value={characters[currentSlot] ?? ''}
+                />
+              )
+            })}
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
 const getNorthMultipleChoiceQuestions = (bankQuestions: BankQuestion[]): MultipleChoiceQuestion[] =>
   bankQuestions
     .filter((question) => question.owner_team === 'north' && question.kind === 'multiple_choice')
@@ -66,6 +143,7 @@ const getSouthWordQuestions = (
     id: question.id,
     prompt: question.prompt,
     expectedAnswer: answerKeys[question.id] ?? '',
+    answerPattern: getWordAnswerPattern(answerKeys[question.id] ?? ''),
   }))
 
 const getPublicSouthGameSnapshot = (game: SouthWordGameState | null) =>
@@ -74,10 +152,11 @@ const getPublicSouthGameSnapshot = (game: SouthWordGameState | null) =>
         ...game,
         context: {
           ...game.context,
-          questions: game.context.questions.map(({ id, prompt }) => ({
+          questions: game.context.questions.map(({ id, prompt, answerPattern }) => ({
             id,
             prompt,
             expectedAnswer: '',
+            answerPattern,
           })),
         },
       }
@@ -451,6 +530,12 @@ function App() {
         setNorthGame(message.state.northGame)
       }
       if (message.state.southGame !== undefined) {
+        const currentGame = southGameRef.current
+        if (message.state.southGame?.status === 'answering'
+          && (!currentGame || currentGame.status !== 'answering'
+            || message.state.southGame.context.currentIndex !== currentGame.context.currentIndex)) {
+          setSouthDraftAnswer('')
+        }
         southGameRef.current = message.state.southGame
         setSouthGame(message.state.southGame)
       }
@@ -829,8 +914,9 @@ function App() {
                     <strong>{currentSouthQuestion.prompt}</strong>
                     <label className="south-answer-field">
                       <span>Đáp án</span>
-                      <input
-                        onChange={(event) => setSouthDraftAnswer(event.target.value)}
+                      <SouthAnswerInput
+                        answerPattern={currentSouthQuestion.answerPattern ?? []}
+                        onChange={setSouthDraftAnswer}
                         value={southDraftAnswer}
                       />
                     </label>
