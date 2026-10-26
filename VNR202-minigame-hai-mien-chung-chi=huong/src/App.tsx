@@ -506,7 +506,7 @@ function App() {
     <div className="app-shell">
       <aside className="sidebar">
         <div className="brand-block">
-          <p className="eyebrow">Trận chiến · Bắc Nam</p>
+          <p className="eyebrow">Tương Trợ · Bắc Nam</p>
           <h1>Hợp sức Bắc - Nam</h1>
         </div>
 
