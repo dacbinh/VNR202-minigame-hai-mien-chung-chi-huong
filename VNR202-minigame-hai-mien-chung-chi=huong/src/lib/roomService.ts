@@ -1,5 +1,6 @@
 import type { LobbyMember, LobbyTeam } from '../domain/lobbyRules'
 import type { RealtimeChannel } from '@supabase/supabase-js'
+import type { NorthGameState } from '../domain/northMultipleChoice'
 import { supabaseClient } from './supabase'
 
 const getClient = () => {
@@ -46,18 +47,25 @@ export type BankQuestion = {
   choices: string[]
   unlock_cost: number
   support_reward_base: number
+  duration_seconds: number
+  points: number
 }
 
 export type RoomMessage = {
   type: string
   requestId?: string
+  errorMessage?: string
   player?: LobbyMember
   state?: {
     players: LobbyMember[]
     status: 'waiting' | 'active' | 'paused'
     questionNumber: number
     questions: BankQuestion[]
+    northGame?: NorthGameState | null
   }
+  playerId?: string
+  questionId?: string
+  optionId?: string
 }
 
 const roomChannelName = (code: string) => `vnr-room:${code}`
@@ -156,7 +164,7 @@ export const sendRoomEvent = sendRoomMessage
 export const loadQuestionBank = async (): Promise<BankQuestion[]> => {
   const { data, error } = await getClient()
     .from('question_bank')
-    .select('id, owner_team, kind, prompt, choices, unlock_cost, support_reward_base')
+    .select('id, owner_team, kind, prompt, choices, unlock_cost, support_reward_base, duration_seconds, points')
     .eq('is_active', true)
     .order('created_at', { ascending: true })
 

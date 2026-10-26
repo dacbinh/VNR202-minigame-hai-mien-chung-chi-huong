@@ -2,6 +2,14 @@ import { useEffect, useRef, useState, type FormEvent } from 'react'
 import type { RealtimeChannel } from '@supabase/supabase-js'
 import { getTeamMemberCount, type LobbyMember, type LobbyTeam } from './domain/lobbyRules'
 import {
+  createNorthGameState,
+  transitionNorthGame,
+  type MultipleChoiceQuestion,
+  type NorthGameActor,
+  type NorthGameEvent,
+  type NorthGameState,
+} from './domain/northMultipleChoice'
+import {
   closeRoomChannel,
   connectPlayerToRoom,
   createHostRoom,
@@ -23,6 +31,24 @@ const teamNames: Record<LobbyTeam, string> = {
   south: 'Miền Nam',
 }
 
+const adminActor: NorthGameActor = { role: 'admin', id: 'host' }
+const multipleChoiceLabels = ['A', 'B', 'C', 'D']
+
+const getNorthMultipleChoiceQuestions = (bankQuestions: BankQuestion[]): MultipleChoiceQuestion[] =>
+  bankQuestions
+    .filter((question) => question.owner_team === 'north' && question.kind === 'multiple_choice')
+    .map((question) => ({
+      id: question.id,
+      prompt: question.prompt,
+      options: question.choices.map((text, index) => ({
+        id: `${question.id}-option-${index + 1}`,
+        label: multipleChoiceLabels[index] ?? `${index + 1}`,
+        text,
+      })),
+      durationSeconds: question.duration_seconds,
+      points: question.points,
+    }))
+
 const getModeFromHash = (hash: string): AppMode =>
   hash.replace('#', '') === 'admin' ? 'admin' : 'player'
 
@@ -42,14 +68,21 @@ function App() {
   const [pendingPlayer, setPendingPlayer] = useState<LobbyMember | null>(null)
   const [players, setPlayers] = useState<LobbyMember[]>([])
   const [sessionStatus, setSessionStatus] = useState<SessionStatus>('waiting')
-  const [questionNumber, setQuestionNumber] = useState(1)
   const [questions, setQuestions] = useState<BankQuestion[]>([])
+  const [northGame, setNorthGame] = useState<NorthGameState | null>(null)
+  const [selectedOptionId, setSelectedOptionId] = useState('')
+  const [revealOptionId, setRevealOptionId] = useState('')
+  const [scoreTargetId, setScoreTargetId] = useState('')
+  const [scoreAmount, setScoreAmount] = useState(1)
+  const [scoreReason, setScoreReason] = useState('')
+  const [clockNow, setClockNow] = useState(() => Date.now())
   const hostChannelRef = useRef<RealtimeChannel | null>(null)
   const playerChannelRef = useRef<RealtimeChannel | null>(null)
   const playersRef = useRef<LobbyMember[]>([])
   const sessionStatusRef = useRef<SessionStatus>('waiting')
   const questionNumberRef = useRef(1)
   const questionsRef = useRef<BankQuestion[]>([])
+  const northGameRef = useRef<NorthGameState | null>(null)
   const pendingJoinRef = useRef<{
     requestId: string
     resolve: () => void
@@ -68,6 +101,49 @@ function App() {
     void closeRoomChannel(playerChannelRef.current)
   }, [])
 
+  useEffect(() => {
+    if (mode !== 'admin' || northGame?.status !== 'question_active'
+      && northGame?.status !== 'answer_revealed' && northGame?.status !== 'intermission') return
+
+    const timer = window.setInterval(() => {
+      const currentGame = northGameRef.current
+      if (!currentGame) return
+      const nextGame = transitionNorthGame(currentGame, { type: 'TICK', now: Date.now() }, adminActor)
+      if (nextGame === currentGame) return
+
+      if (nextGame.context.currentIndex !== currentGame.context.currentIndex) setRevealOptionId('')
+      northGameRef.current = nextGame
+      setNorthGame(nextGame)
+      const nextStatus = nextGame.status === 'question_active' ? 'active' : 'waiting'
+      sessionStatusRef.current = nextStatus
+      setSessionStatus(nextStatus)
+      questionNumberRef.current = nextGame.context.currentIndex + 1
+      const channel = hostChannelRef.current
+      if (channel) {
+        void sendRoomEvent(channel, {
+          type: 'room-state',
+          state: {
+            players: playersRef.current,
+            status: nextStatus,
+            questionNumber: questionNumberRef.current,
+            questions: questionsRef.current,
+            northGame: nextGame,
+          },
+        })
+      }
+    }, 250)
+
+    return () => window.clearInterval(timer)
+  }, [mode, northGame?.status])
+
+  useEffect(() => {
+    if (northGame?.status !== 'question_active' && northGame?.status !== 'answer_revealed'
+      && northGame?.status !== 'intermission') return
+
+    const timer = window.setInterval(() => setClockNow(Date.now()), 250)
+    return () => window.clearInterval(timer)
+  }, [northGame?.status])
+
   const navigate = (nextMode: AppMode) => {
     window.history.replaceState(null, '', `#${nextMode}`)
     setMode(nextMode)
@@ -84,8 +160,66 @@ function App() {
         status: sessionStatusRef.current,
         questionNumber: questionNumberRef.current,
         questions: questionsRef.current,
+        northGame: northGameRef.current,
         ...overrides,
       },
+    })
+  }
+
+  const startNorthGame = () => {
+    const game = createNorthGameState(
+      getNorthMultipleChoiceQuestions(questionsRef.current),
+      playersRef.current
+        .filter((player) => player.team === 'north')
+        .map((player) => player.profileId),
+    )
+    northGameRef.current = game
+    setNorthGame(game)
+    if (game.status === 'lobby') dispatchNorthGame({ type: 'ADMIN_START' })
+    else setAdminError(game.status === 'error' ? game.message : 'Không thể bắt đầu trận.')
+  }
+
+  const submitNorthAnswer = async () => {
+    const currentQuestion = northGame?.context.questions[northGame.context.currentIndex]
+    const player = pendingPlayer
+    const channel = playerChannelRef.current
+    if (!currentQuestion || !player || !channel || !selectedOptionId || northGame?.status !== 'question_active') return
+
+    try {
+      await sendRoomEvent(channel, {
+        type: 'north-answer',
+        requestId: globalThis.crypto.randomUUID(),
+        playerId: player.profileId,
+        questionId: currentQuestion.id,
+        optionId: selectedOptionId,
+      })
+    } catch (error) {
+      setJoinError(getRoomServiceErrorMessage(error, 'Không gửi được câu trả lời.'))
+    }
+  }
+
+  const dispatchNorthGame = (event: NorthGameEvent, actor: NorthGameActor = adminActor) => {
+    const currentGame = northGameRef.current
+    if (!currentGame) return
+
+    const nextGame = transitionNorthGame(currentGame, event, actor)
+    if (nextGame === currentGame) return
+
+    if (nextGame.context.currentIndex !== currentGame.context.currentIndex) setRevealOptionId('')
+    northGameRef.current = nextGame
+    setNorthGame(nextGame)
+    const nextSessionStatus = nextGame.status === 'question_active'
+      ? 'active'
+      : nextGame.status === 'paused'
+        ? 'paused'
+        : 'waiting'
+    sessionStatusRef.current = nextSessionStatus
+    setSessionStatus(nextSessionStatus)
+    questionNumberRef.current = nextGame.context.currentIndex + 1
+    void broadcastHostState({
+      northGame: nextGame,
+      status: nextSessionStatus,
+      questionNumber: questionNumberRef.current,
     })
   }
 
@@ -93,9 +227,43 @@ function App() {
     const channel = hostChannelRef.current
     if (!channel) return
 
+    if (message.type === 'north-answer' && message.playerId && message.questionId
+      && message.optionId && message.requestId
+      && playersRef.current.some((player) => player.profileId === message.playerId)) {
+      dispatchNorthGame({
+        type: 'SUBMIT_ANSWER',
+        questionId: message.questionId,
+        optionId: message.optionId,
+        requestId: message.requestId,
+      }, { role: 'player', id: message.playerId })
+      return
+    }
+
     if (message.type === 'room-probe' && message.requestId) {
       void sendRoomEvent(channel, { type: 'room-found', requestId: message.requestId })
       void broadcastHostState()
+      return
+    }
+
+    if (message.type === 'join-request' && message.requestId && northGameRef.current
+      && northGameRef.current.status !== 'lobby') {
+      void sendRoomEvent(channel, {
+        type: 'join-rejected',
+        requestId: message.requestId,
+        errorMessage: 'Trận đã bắt đầu, chủ phòng không nhận thêm người chơi.',
+      })
+      return
+    }
+
+    if (message.type === 'north-answer' && message.playerId && message.questionId
+      && message.optionId && message.requestId
+      && playersRef.current.some((player) => player.profileId === message.playerId)) {
+      dispatchNorthGame({
+        type: 'SUBMIT_ANSWER',
+        questionId: message.questionId,
+        optionId: message.optionId,
+        requestId: message.requestId,
+      }, { role: 'player', id: message.playerId })
       return
     }
 
@@ -124,8 +292,16 @@ function App() {
       questionsRef.current = message.state.questions
       setPlayers(message.state.players)
       setSessionStatus(message.state.status)
-      setQuestionNumber(message.state.questionNumber)
       setQuestions(message.state.questions)
+      if (message.state.northGame !== undefined) {
+        const currentGame = northGameRef.current
+        if (message.state.northGame && currentGame
+          && message.state.northGame.context.currentIndex !== currentGame.context.currentIndex) {
+          setSelectedOptionId('')
+        }
+        northGameRef.current = message.state.northGame
+        setNorthGame(message.state.northGame)
+      }
     }
 
     const pendingJoin = pendingJoinRef.current
@@ -133,22 +309,10 @@ function App() {
       pendingJoin.resolve()
       pendingJoinRef.current = null
     }
-  }
-
-  const updateSessionStatus = (nextStatus: SessionStatus) => {
-    sessionStatusRef.current = nextStatus
-    setSessionStatus(nextStatus)
-    void broadcastHostState({ status: nextStatus })
-  }
-
-  const skipQuestion = () => {
-    const questionCount = questionsRef.current.length
-    if (questionCount === 0) return
-
-    const nextQuestion = (questionNumberRef.current % questionCount) + 1
-    questionNumberRef.current = nextQuestion
-    setQuestionNumber(nextQuestion)
-    void broadcastHostState({ questionNumber: nextQuestion })
+    if (pendingJoin && message.type === 'join-rejected' && message.requestId === pendingJoin.requestId) {
+      pendingJoin.reject(new Error(message.errorMessage ?? 'Chủ phòng từ chối lượt tham gia.'))
+      pendingJoinRef.current = null
+    }
   }
 
   const handleJoinRoom = async (event: FormEvent<HTMLFormElement>) => {
@@ -235,6 +399,8 @@ function App() {
       const bankQuestions = await loadQuestionBank()
       questionsRef.current = bankQuestions
       setQuestions(bankQuestions)
+      northGameRef.current = null
+      setNorthGame(null)
       playersRef.current = []
       sessionStatusRef.current = 'waiting'
       questionNumberRef.current = bankQuestions.length > 0 ? 1 : 0
@@ -244,7 +410,6 @@ function App() {
       setCreatedRoomCode(room.roomCode)
       setPlayers([])
       setSessionStatus('waiting')
-      setQuestionNumber(bankQuestions.length > 0 ? 1 : 0)
       setPlayerStep('join')
       setPendingPlayer(null)
       await broadcastHostState()
@@ -257,7 +422,46 @@ function App() {
 
   const northCount = getTeamMemberCount(players, 'north')
   const southCount = getTeamMemberCount(players, 'south')
-  const currentQuestion = questions[questionNumber - 1]
+  const currentNorthQuestion = northGame?.context.questions[northGame.context.currentIndex]
+  const currentNorthResolution = northGame?.context.resolutions.find(
+    (resolution) => resolution.questionId === currentNorthQuestion?.id,
+  )
+  const playerNorthAnswer = northGame?.context.answers.find(
+    (answer) => answer.playerId === pendingPlayer?.profileId && answer.questionId === currentNorthQuestion?.id,
+  )
+  const remainingMs = northGame?.status === 'question_active'
+    ? (northGame.context.questionDeadline ?? clockNow) - clockNow
+    : northGame?.status === 'intermission'
+      ? (northGame.context.intermissionDeadline ?? clockNow) - clockNow
+      : northGame?.status === 'answer_revealed'
+        ? (northGame.context.feedbackDeadline ?? clockNow) - clockNow
+        : 0
+  const northGameStatusLabel = northGame?.status === 'question_active'
+    ? 'Câu hỏi đang mở'
+    : northGame?.status === 'answer_revealed'
+      ? 'Đã công bố đáp án'
+      : northGame?.status === 'intermission'
+        ? 'Chuyển câu hỏi'
+        : northGame?.status === 'paused'
+          ? 'Đã tạm dừng'
+          : northGame?.status === 'completed'
+            ? 'Đã hoàn thành'
+            : northGame?.status === 'error'
+              ? 'Cần kiểm tra'
+              : 'Sảnh chờ'
+  const playerGameStatus = northGame?.status === 'question_active'
+    ? 'Trận đang diễn ra.'
+    : northGame?.status === 'answer_revealed'
+      ? 'Chủ phòng đang công bố kết quả câu hỏi.'
+      : northGame?.status === 'intermission'
+        ? 'Đang chuẩn bị câu hỏi tiếp theo.'
+        : northGame?.status === 'paused'
+          ? 'Trận đấu đang tạm dừng.'
+          : northGame?.status === 'completed'
+            ? 'Trận đấu đã kết thúc.'
+            : sessionStatus === 'active'
+              ? 'Trận đang diễn ra.'
+              : 'Đang chờ chủ phòng bắt đầu.'
   const pageTitle = mode === 'admin'
     ? 'Phòng chờ quản trị'
     : playerStep === 'join'
@@ -363,19 +567,69 @@ function App() {
               <span className="status-dot" aria-hidden="true" />
               <div>
                 <strong>Đã tham gia · {teamNames[pendingPlayer.team]}</strong>
-                <span>{sessionStatus === 'active' ? 'Chủ phòng đã bắt đầu trận.' : 'Đang chờ chủ phòng bắt đầu.'}</span>
+                <span>{playerGameStatus}</span>
               </div>
             </div>
             <div className="player-summary">
               <span>{pendingPlayer.displayName}</span>
               <strong>{teamNames[pendingPlayer.team]}</strong>
             </div>
-            {sessionStatus === 'active' && currentQuestion && (
-              <div className="question-placeholder">
-                <strong>Câu {questionNumber}</strong>
-                <p>{currentQuestion.prompt}</p>
-                {currentQuestion.choices.map((choice) => <p key={choice}>{choice}</p>)}
+            {pendingPlayer.team === 'north' && northGame && (
+              <div className="question-placeholder north-question-view">
+                {northGame.status === 'question_active' && currentNorthQuestion && (
+                  <>
+                    <div className="progress-label">
+                      <strong>Câu {northGame.context.currentIndex + 1}</strong>
+                      <span>Còn {Math.max(0, Math.ceil(remainingMs / 1000))} giây</span>
+                    </div>
+                    <p>{currentNorthQuestion.prompt}</p>
+                    <div className="north-answer-options">
+                      {currentNorthQuestion.options.map((option) => (
+                        <button
+                          aria-pressed={selectedOptionId === option.id}
+                          className={selectedOptionId === option.id ? 'north-answer-option selected' : 'north-answer-option'}
+                          disabled={Boolean(playerNorthAnswer)}
+                          key={option.id}
+                          onClick={() => setSelectedOptionId(option.id)}
+                          type="button"
+                        >
+                          <strong>{option.label}</strong>
+                          <span>{option.text}</span>
+                        </button>
+                      ))}
+                    </div>
+                    {playerNorthAnswer ? (
+                      <p className="lobby-status ready">Đã ghi nhận câu trả lời của bạn.</p>
+                    ) : (
+                      <button
+                        className="primary-button"
+                        disabled={!selectedOptionId}
+                        onClick={submitNorthAnswer}
+                        type="button"
+                      >
+                        Gửi câu trả lời
+                      </button>
+                    )}
+                  </>
+                )}
+                {northGame.status === 'answer_revealed' && (
+                  <>
+                    <strong>{currentNorthResolution?.reason === 'timeout' ? 'Đã hết thời gian' : 'Đáp án đã công bố'}</strong>
+                    {currentNorthResolution?.correctOptionId
+                      ? <p>Đáp án đúng: {currentNorthQuestion?.options.find((option) => option.id === currentNorthResolution.correctOptionId)?.text}</p>
+                      : <p>Chủ phòng đang xác nhận đáp án.</p>}
+                  </>
+                )}
+                {northGame.status === 'intermission' && (
+                  <p>Câu tiếp theo sau {Math.max(0, Math.ceil(remainingMs / 1000))} giây.</p>
+                )}
+                {northGame.status === 'paused' && <p>Trận đấu đang tạm dừng.</p>}
+                {northGame.status === 'completed' && <p>Trận đấu đã kết thúc.</p>}
+                <p>Điểm của bạn: {northGame.context.scores[pendingPlayer.profileId] ?? 0}</p>
               </div>
+            )}
+            {pendingPlayer.team === 'south' && northGame?.status === 'question_active' && (
+              <div className="question-placeholder"><p>Đội Miền Bắc đang trả lời câu hỏi.</p></div>
             )}
           </section>
         )}
@@ -456,56 +710,161 @@ function App() {
             <section className="panel-card host-controls">
               <div className="section-heading">
                 <div>
-                  <p className="section-kicker">Quản lý phiên</p>
-                  <h3>Điều khiển trận</h3>
+                  <p className="section-kicker">Quản lý Miền Bắc</p>
+                  <h3>Điều khiển trắc nghiệm</h3>
                 </div>
-                <span className={`session-state ${sessionStatus}`}>
-                  {sessionStatus === 'waiting' ? 'Đang chờ' : sessionStatus === 'active' ? 'Đang diễn ra' : 'Đã tạm dừng'}
-                </span>
+                <span className={`session-state ${northGame?.status ?? 'lobby'}`}>{northGameStatusLabel}</span>
               </div>
               <div className="question-counter">
-                <span>{questions.length > 0 ? `Câu hỏi ${questionNumber} / ${questions.length}` : 'Chưa có câu hỏi'}</span>
-                <strong>{currentQuestion?.owner_team === 'north' ? 'Bắc' : currentQuestion?.owner_team === 'south' ? 'Nam' : '—'}</strong>
+                <span>{northGame && northGame.status !== 'lobby' && northGame.context.questions.length > 0
+                  ? `Câu ${northGame.context.currentIndex + 1} / ${northGame.context.questions.length}`
+                  : `${getNorthMultipleChoiceQuestions(questions).length} câu trắc nghiệm Miền Bắc`}</span>
+                <strong>{northGame?.status === 'question_active'
+                  ? `${Math.max(0, Math.ceil(remainingMs / 1000))} giây`
+                  : northGame?.status === 'intermission'
+                    ? `${Math.max(0, Math.ceil(remainingMs / 1000))} giây`
+                    : '—'}</strong>
               </div>
-              {currentQuestion && (
+              {northGame?.status === 'error' && <p className="form-error" role="alert">{northGame.message}</p>}
+              {currentNorthQuestion && (
                 <div className="question-placeholder">
-                  <strong>{currentQuestion.kind === 'multiple_choice' ? 'Trắc nghiệm' : 'Điền đáp án'}</strong>
-                  <p>{currentQuestion.prompt}</p>
-                  {currentQuestion.choices.map((choice) => <p key={choice}>{choice}</p>)}
+                  <strong>{currentNorthQuestion.prompt}</strong>
+                  {currentNorthQuestion.options.map((option) => (
+                    <p key={option.id}>{option.label}. {option.text}</p>
+                  ))}
+                </div>
+              )}
+              {northGame && currentNorthQuestion && northGame.context.answers.some((answer) => answer.questionId === currentNorthQuestion.id) && (
+                <div className="answer-records">
+                  <h4>Câu trả lời đã nhận</h4>
+                  {northGame.context.answers
+                    .filter((answer) => answer.questionId === currentNorthQuestion.id)
+                    .map((answer) => {
+                      const answeringPlayer = players.find((player) => player.profileId === answer.playerId)
+                      const option = currentNorthQuestion.options.find((item) => item.id === answer.selectedOptionId)
+                      return (
+                        <div className="player-summary" key={answer.playerId}>
+                          <span>{answeringPlayer?.displayName ?? 'Người chơi'} · {option?.label ?? '—'}</span>
+                          <strong>{northGame.context.scores[answer.playerId] ?? 0} điểm</strong>
+                        </div>
+                      )
+                    })}
                 </div>
               )}
               <div className="action-row host-actions">
-                {sessionStatus === 'waiting' && (
+                {(!northGame || northGame.status === 'lobby' || northGame.status === 'error') && (
                   <button
                     className="primary-button"
-                    disabled={!createdRoomCode || players.length === 0 || questions.length === 0}
-                    onClick={() => updateSessionStatus('active')}
+                    disabled={!createdRoomCode || northCount === 0 || getNorthMultipleChoiceQuestions(questions).length === 0}
+                    onClick={startNorthGame}
                     type="button"
                   >
                     Bắt đầu trận
                   </button>
                 )}
-                {sessionStatus === 'active' && (
-                  <button className="secondary-button" onClick={() => updateSessionStatus('paused')} type="button">
-                    Tạm dừng
+                {northGame?.status === 'question_active' && (
+                  <>
+                    <button className="secondary-button" onClick={() => dispatchNorthGame({ type: 'ADMIN_PAUSE' })} type="button">Tạm dừng</button>
+                    <button className="secondary-button" onClick={() => dispatchNorthGame({ type: 'ADMIN_SKIP_QUESTION' })} type="button">Bỏ qua câu hỏi</button>
+                  </>
+                )}
+                {northGame?.status === 'paused' && (
+                  <button className="primary-button" onClick={() => dispatchNorthGame({ type: 'ADMIN_RESUME' })} type="button">Tiếp tục</button>
+                )}
+                {northGame?.status === 'intermission' && (
+                  <>
+                    <button className="secondary-button" onClick={() => dispatchNorthGame({ type: 'ADMIN_PAUSE' })} type="button">Tạm dừng</button>
+                    <button className="secondary-button" onClick={() => dispatchNorthGame({ type: 'ADMIN_SKIP_INTERMISSION' })} type="button">Qua phần nghỉ</button>
+                  </>
+                )}
+                {northGame?.status === 'completed' && (
+                  <button className="primary-button" onClick={() => dispatchNorthGame({ type: 'ADMIN_RESTART' })} type="button">Chơi lại</button>
+                )}
+                {northGame && ['question_active', 'answer_revealed', 'intermission', 'paused'].includes(northGame.status) && (
+                  <button
+                    className="secondary-button"
+                    onClick={() => dispatchNorthGame({ type: 'ADMIN_END_GAME', reason: 'Chủ phòng kết thúc trận' })}
+                    type="button"
+                  >
+                    Kết thúc trận
                   </button>
                 )}
-                {sessionStatus === 'paused' && (
-                  <button className="primary-button" onClick={() => updateSessionStatus('active')} type="button">
-                    Tiếp tục trận
-                  </button>
-                )}
-                <button
-                  className="secondary-button"
-                  disabled={sessionStatus !== 'active' || questions.length === 0}
-                  onClick={skipQuestion}
-                  type="button"
-                >
-                  Bỏ qua câu hỏi
-                </button>
               </div>
+              {(northGame?.status === 'question_active'
+                || northGame?.status === 'answer_revealed' && currentNorthResolution?.reason === 'timeout') && currentNorthQuestion && (
+                <div className="admin-tools">
+                  <label>
+                    <span>Đáp án do chủ phòng xác nhận</span>
+                    <select value={revealOptionId} onChange={(event) => setRevealOptionId(event.target.value)}>
+                      <option value="">Chọn đáp án</option>
+                      {currentNorthQuestion.options.map((option) => (
+                        <option key={option.id} value={option.id}>{option.label}. {option.text}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <button
+                    className="secondary-button"
+                    disabled={!revealOptionId}
+                    onClick={() => dispatchNorthGame({ type: 'ADMIN_REVEAL_ANSWER', correctOptionId: revealOptionId })}
+                    type="button"
+                  >
+                    Công bố đáp án
+                  </button>
+                </div>
+              )}
+              {northGame && !['lobby', 'completed', 'error'].includes(northGame.status) && (
+                <div className="admin-tools">
+                  <label>
+                    <span>Người nhận điểm</span>
+                    <select value={scoreTargetId} onChange={(event) => setScoreTargetId(event.target.value)}>
+                      <option value="">Chọn người chơi</option>
+                      {players.filter((player) => player.team === 'north').map((player) => (
+                        <option key={player.profileId} value={player.profileId}>{player.displayName}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>
+                    <span>Số điểm</span>
+                    <input min="1" onChange={(event) => setScoreAmount(Number(event.target.value))} type="number" value={scoreAmount} />
+                  </label>
+                  <label>
+                    <span>Lý do</span>
+                    <input onChange={(event) => setScoreReason(event.target.value)} value={scoreReason} />
+                  </label>
+                  <div className="action-row host-actions">
+                    <button
+                      className="secondary-button"
+                      disabled={!scoreTargetId || !scoreReason.trim() || scoreAmount <= 0}
+                      onClick={() => {
+                        dispatchNorthGame({
+                          type: 'ADMIN_GRANT_POINTS', targetId: scoreTargetId, amount: scoreAmount,
+                          reason: scoreReason, requestId: globalThis.crypto.randomUUID(),
+                        })
+                        setScoreReason('')
+                      }}
+                      type="button"
+                    >
+                      Cộng điểm
+                    </button>
+                    <button
+                      className="secondary-button"
+                      disabled={!scoreTargetId || !scoreReason.trim() || scoreAmount <= 0}
+                      onClick={() => {
+                        dispatchNorthGame({
+                          type: 'ADMIN_DEDUCT_POINTS', targetId: scoreTargetId, amount: scoreAmount,
+                          reason: scoreReason, requestId: globalThis.crypto.randomUUID(),
+                        })
+                        setScoreReason('')
+                      }}
+                      type="button"
+                    >
+                      Trừ điểm
+                    </button>
+                  </div>
+                </div>
+              )}
               <p className="control-note">
-                Chủ phòng chủ động bắt đầu sau khi danh sách người chơi đã đầy đủ.
+                Câu trả lời do người chơi gửi; chủ phòng xác nhận đáp án và điều chỉnh điểm.
               </p>
             </section>
           </div>

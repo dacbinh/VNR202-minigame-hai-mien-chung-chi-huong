@@ -12,6 +12,14 @@ describe('normalizeAnswer', () => {
     expect(normalizeAnswer('  Hà Nội  ', { trim: true, caseInsensitive: true, collapseWhitespace: true })).toBe('hà nội')
     expect(normalizeAnswer('Hà   Nội', { trim: true, caseInsensitive: true, collapseWhitespace: true })).toBe('hà nội')
   })
+
+  it('chuẩn hóa Unicode tiếng Việt nhưng giữ dấu và khoảng trắng bên trong', () => {
+    const config = { trim: true, caseInsensitive: true, collapseWhitespace: false }
+
+    expect(normalizeAnswer('HA\u0300 NO\u0302\u0323I', config)).toBe('hà nội')
+    expect(normalizeAnswer('Ha Noi', config)).not.toBe(normalizeAnswer('Hà Nội', config))
+    expect(normalizeAnswer('Ha   Noi', config)).not.toBe(normalizeAnswer('Ha Noi', config))
+  })
 })
 
 describe('calculateSupportReward', () => {

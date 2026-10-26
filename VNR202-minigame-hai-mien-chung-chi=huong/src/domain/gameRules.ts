@@ -31,14 +31,14 @@ export const normalizeAnswer = (
   value: string,
   config: AnswerNormalizationConfig,
 ): string => {
-  let normalized = value
+  let normalized = value.normalize('NFC')
 
   if (config.trim) {
     normalized = normalized.trim()
   }
 
   if (config.caseInsensitive) {
-    normalized = normalized.toLocaleLowerCase()
+    normalized = normalized.toLocaleLowerCase('vi-VN')
   }
 
   if (config.collapseWhitespace) {
