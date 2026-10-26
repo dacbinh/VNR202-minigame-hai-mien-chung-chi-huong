@@ -1,13 +1,14 @@
 # Hợp sức Bắc - Nam
 
-Ứng dụng demo frontend cho game quiz multiplayer theo checkpoint đã định nghĩa trong `ai_vibecode_game_spec.md`.
+Ứng dụng React/Vite cho game quiz Bắc - Nam. Supabase lưu ngân hàng câu hỏi; Supabase Realtime Broadcast chuyển trạng thái phòng giữa chủ phòng và người chơi.
 
 ## Mục tiêu
 
 - Miền Nam có tiến độ trận, điểm chung và mở khóa câu hỏi.
 - Miền Bắc có điểm hỗ trợ và cộng thưởng vào quỹ của Miền Nam.
-- Admin có quyền quản lý phiên và điều kiện chiến thắng.
-- Supabase dùng cho dữ liệu thật, Realtime và RPC; frontend chỉ hiển thị trạng thái và không tự gán điểm.
+- Chủ phòng tạo mã phòng và giữ trạng thái trận trong trình duyệt của mình.
+- Người chơi xác thực mã bằng cách kết nối tới kênh Realtime đang mở, sau đó chọn đội.
+- Câu hỏi đang mở được tải từ `question_bank`; đáp án đúng nằm riêng trong `question_bank_answers` và không được gửi đến client.
 
 ## Cài đặt nhanh
 
@@ -38,6 +39,20 @@ VITE_SUPABASE_ANON_KEY=your-anon-key
 npm run dev
 ```
 
+## Cấu hình dữ liệu
+
+1. Liên kết Supabase project, sau đó áp dụng migrations:
+
+```bash
+supabase link --project-ref <project-ref>
+supabase db push
+```
+
+2. Bật Realtime trong Supabase. Không cần bật đăng nhập ẩn danh cho luồng phòng hiện tại.
+3. Thêm câu hỏi vào `question_bank` và đặt `is_active` thành `true` để câu hỏi được tải vào trận. Danh sách lựa chọn lưu trong `choices`; đáp án giữ trong `question_bank_answers`. Không thêm đáp án vào payload công khai.
+
+Phòng và roster chỉ tồn tại khi trang chủ phòng còn kết nối. Nếu chủ phòng tải lại trang hoặc đóng trình duyệt, phiên đang chạy kết thúc; database không lưu mã phòng, người chơi, điểm hoặc trạng thái trận. Kênh dùng mã phòng làm tên, nên mã không phải cơ chế xác thực cho dữ liệu nhạy cảm.
+
 ## Kiểm tra
 
 ```bash
@@ -49,12 +64,13 @@ npm run build
 ## Cấu trúc chính
 
 - `src/domain`: logic game thuần, không phụ thuộc UI.
-- `src/lib/supabase.ts`: cấu hình client Supabase an toàn.
-- `src/App.tsx`: shell giao diện và màn hình mock/demo.
-- `supabase/migrations`: schema và quy tắc database.
+- `src/lib/supabase.ts`: cấu hình client Supabase.
+- `src/lib/roomService.ts`: tải câu hỏi và gửi thông điệp phòng qua Realtime Broadcast.
+- `src/App.tsx`: giao diện; chủ phòng là nguồn trạng thái tạm thời cho roster và điều khiển trận.
+- `supabase/migrations`: schema câu hỏi và quyền truy cập.
 
 ## Ghi chú
 
-- Các màn hình hiện tại đang là demo local và chỉ dùng placeholder khi chưa có dữ liệu thật.
-- Dữ liệu câu hỏi, đáp án và hành vi multiplayer thực thi được ưu tiên qua Supabase/PostgreSQL function thay vì client-side fake logic.
-- Các trạng thái UI được giữ bằng tiếng Việt để phù hợp với yêu cầu giao diện người dùng.
+- Chưa có câu hỏi mẫu hoặc nội dung được seed; ngân hàng rỗng sẽ khóa nút bắt đầu.
+- Điểm, tiến độ, chấm đáp án và lưu trạng thái qua lần tải lại chưa nằm trong checkpoint này.
+- Các trạng thái UI được giữ bằng tiếng Việt.

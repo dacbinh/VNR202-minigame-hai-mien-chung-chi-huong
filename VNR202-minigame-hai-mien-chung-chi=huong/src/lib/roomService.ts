@@ -1,18 +1,6 @@
 import type { LobbyMember, LobbyTeam } from '../domain/lobbyRules'
+import type { RealtimeChannel } from '@supabase/supabase-js'
 import { supabaseClient } from './supabase'
-
-type RoomResult = {
-  session_id: string
-  room_code: string
-  session_status?: string
-}
-
-type TeamMemberRow = {
-  profile_id: string
-  team: LobbyTeam
-  is_admin: boolean
-  profiles: { display_name: string } | null
-}
 
 const getClient = () => {
   if (!supabaseClient) {
@@ -23,89 +11,155 @@ const getClient = () => {
 }
 
 export const getRoomServiceErrorMessage = (error: unknown, fallback: string) => {
-  const message = error instanceof Error ? error.message : ''
+  const errorFields = typeof error === 'object' && error !== null
+    ? error as Record<string, unknown>
+    : {}
+  const message = error instanceof Error
+    ? error.message
+    : typeof error === 'string'
+      ? error
+    : [errorFields.message, errorFields.details, errorFields.hint]
+        .filter((value): value is string => typeof value === 'string' && value.length > 0)
+        .join(' ')
   const normalizedMessage = message.toLowerCase()
 
-  if (normalizedMessage.includes('schema cache') || normalizedMessage.includes('create_lobby_room') || normalizedMessage.includes('join_lobby_room')) {
-    return 'Chức năng phòng chưa được cài trên máy chủ. Hãy áp dụng migration 20261026_0002_lobby_room_rpcs.sql trong Supabase.'
+  if (normalizedMessage.includes('question_bank') || normalizedMessage.includes('permission denied') || normalizedMessage.includes('row-level security')) {
+    return 'Không thể tải ngân hàng câu hỏi. Hãy áp dụng migration question_bank trong Supabase và cấp quyền đọc câu hỏi đang mở.'
   }
 
-  if (normalizedMessage.includes('room code was not found')) {
+  if (normalizedMessage.includes('room_code_not_found')) {
     return 'Không tìm thấy mã phòng. Hãy kiểm tra mã và thử lại.'
   }
 
-  if (normalizedMessage.includes('anonymous') && normalizedMessage.includes('disabled')) {
-    return 'Supabase chưa bật đăng nhập ẩn danh. Hãy bật Anonymous Sign-Ins trong phần Auth.'
+  if (normalizedMessage.includes('channel') || normalizedMessage.includes('realtime')) {
+    return 'Không thể kết nối phòng. Hãy kiểm tra Supabase Realtime và thử lại.'
   }
 
   return message || fallback
 }
 
-const ensureAnonymousUser = async () => {
-  const client = getClient()
-  const { data: sessionData, error: sessionError } = await client.auth.getSession()
-
-  if (sessionError) throw sessionError
-  if (sessionData.session?.user) return sessionData.session.user.id
-
-  const { data, error } = await client.auth.signInAnonymously()
-  if (error) throw error
-  if (!data.user) throw new Error('Không thể tạo phiên người dùng ẩn danh.')
-
-  return data.user.id
+export type BankQuestion = {
+  id: string
+  owner_team: LobbyTeam
+  kind: 'multiple_choice' | 'fill_blank'
+  prompt: string
+  choices: string[]
+  unlock_cost: number
+  support_reward_base: number
 }
 
-const getRoomResult = (data: RoomResult[] | RoomResult | null): RoomResult => {
-  const room = Array.isArray(data) ? data[0] : data
-  if (!room?.session_id || !room.room_code) {
-    throw new Error('Máy chủ không trả về thông tin phòng hợp lệ.')
+export type RoomMessage = {
+  type: string
+  requestId?: string
+  player?: LobbyMember
+  state?: {
+    players: LobbyMember[]
+    status: 'waiting' | 'active' | 'paused'
+    questionNumber: number
+    questions: BankQuestion[]
   }
-
-  return room
 }
 
-export const createLobbyRoom = async () => {
-  await ensureAnonymousUser()
+const roomChannelName = (code: string) => `vnr-room:${code}`
+const roomMessageEvent = 'room-message'
 
-  const { data, error } = await getClient().rpc('create_lobby_room')
-  if (error) throw error
+const createId = () => globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`
 
-  const room = getRoomResult(data as RoomResult[] | RoomResult | null)
-  return { sessionId: room.session_id, roomCode: room.room_code }
-}
+const waitForSubscription = (channel: RealtimeChannel) =>
+  new Promise<void>((resolve, reject) => {
+    const timeout = window.setTimeout(() => reject(new Error('Kết nối phòng quá thời gian chờ.')), 8000)
 
-export const joinLobbyRoom = async (
-  roomCode: string,
-  displayName: string,
-  team: LobbyTeam,
-) => {
-  const profileId = await ensureAnonymousUser()
-  const { data, error } = await getClient().rpc('join_lobby_room', {
-    p_code: roomCode.trim().toUpperCase(),
-    p_display_name: displayName.trim(),
-    p_team: team,
+    channel.subscribe((status, error) => {
+      if (status === 'SUBSCRIBED') {
+        window.clearTimeout(timeout)
+        resolve()
+      } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED') {
+        window.clearTimeout(timeout)
+        reject(error ?? new Error('Không thể kết nối kênh phòng.'))
+      }
+    })
   })
 
-  if (error) throw error
+const createRoomChannel = (
+  code: string,
+  onMessage: (message: RoomMessage) => void,
+) => getClient()
+  .channel(roomChannelName(code), {
+    config: { broadcast: { ack: true, self: false }, private: false },
+  })
+  .on('broadcast', { event: roomMessageEvent }, ({ payload }) => {
+    if (payload && typeof payload === 'object' && 'type' in payload) {
+      onMessage(payload as RoomMessage)
+    }
+  })
 
-  const room = getRoomResult(data as RoomResult[] | RoomResult | null)
-  return { sessionId: room.session_id, roomCode: room.room_code, profileId }
+const sendRoomMessage = async (channel: RealtimeChannel, message: RoomMessage) => {
+  const result = await channel.send({ type: 'broadcast', event: roomMessageEvent, payload: message })
+  if (result !== 'ok') throw new Error('Không thể gửi dữ liệu đến phòng.')
 }
 
-export const getRoomMembers = async (sessionId: string): Promise<LobbyMember[]> => {
+export const closeRoomChannel = async (channel: RealtimeChannel | null) => {
+  if (channel && supabaseClient) await supabaseClient.removeChannel(channel)
+}
+
+export const createHostRoom = async (onMessage: (message: RoomMessage) => void) => {
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
+  const randomValues = new Uint8Array(6)
+  globalThis.crypto.getRandomValues(randomValues)
+  const roomCode = Array.from(randomValues, (value) => alphabet[value % alphabet.length]).join('')
+  const channel = createRoomChannel(roomCode, onMessage)
+
+  try {
+    await waitForSubscription(channel)
+    return { roomCode, channel }
+  } catch (error) {
+    await closeRoomChannel(channel)
+    throw error
+  }
+}
+
+export const connectPlayerToRoom = async (
+  roomCode: string,
+  onMessage: (message: RoomMessage) => void,
+) => {
+  const requestId = createId()
+  let resolveFound: (() => void) | undefined
+  let rejectFound: ((error: Error) => void) | undefined
+  const roomFound = new Promise<void>((resolve, reject) => {
+    resolveFound = resolve
+    rejectFound = reject
+  })
+  const channel = createRoomChannel(roomCode, (message) => {
+    if (message.type === 'room-found' && message.requestId === requestId) resolveFound?.()
+    onMessage(message)
+  })
+
+  try {
+    await waitForSubscription(channel)
+    await sendRoomMessage(channel, { type: 'room-probe', requestId })
+    await Promise.race([
+      roomFound,
+      new Promise<never>((_, reject) => {
+        window.setTimeout(() => reject(new Error('ROOM_CODE_NOT_FOUND')), 4000)
+      }),
+    ])
+    return { roomCode: roomCode.trim().toUpperCase(), channel }
+  } catch (error) {
+    rejectFound?.(error instanceof Error ? error : new Error('Không tìm thấy phòng.'))
+    await closeRoomChannel(channel)
+    throw error
+  }
+}
+
+export const sendRoomEvent = sendRoomMessage
+
+export const loadQuestionBank = async (): Promise<BankQuestion[]> => {
   const { data, error } = await getClient()
-    .from('team_members')
-    .select('profile_id, team, is_admin, profiles(display_name)')
-    .eq('session_id', sessionId)
-    .eq('is_admin', false)
-    .order('joined_at', { ascending: true })
+    .from('question_bank')
+    .select('id, owner_team, kind, prompt, choices, unlock_cost, support_reward_base')
+    .eq('is_active', true)
+    .order('created_at', { ascending: true })
 
   if (error) throw error
-
-  return ((data ?? []) as unknown as TeamMemberRow[]).map((member) => ({
-    profileId: member.profile_id,
-    displayName: member.profiles?.display_name ?? 'Người chơi',
-    team: member.team,
-    isAdmin: member.is_admin,
-  }))
+  return (data ?? []) as BankQuestion[]
 }

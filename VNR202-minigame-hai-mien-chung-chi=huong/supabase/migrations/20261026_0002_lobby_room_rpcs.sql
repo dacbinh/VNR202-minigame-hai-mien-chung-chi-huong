@@ -1,4 +1,4 @@
-BEGIN;
+
 
 GRANT SELECT ON public.game_sessions, public.team_members, public.profiles TO authenticated;
 
@@ -124,5 +124,3 @@ EXCEPTION WHEN duplicate_object THEN
     NULL;
 END;
 $$;
-
-COMMIT;
