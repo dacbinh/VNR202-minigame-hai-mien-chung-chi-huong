@@ -13,8 +13,8 @@ USING (
         FROM public.question_bank qb
         WHERE qb.id = question_bank_answers.question_id
           AND qb.is_active = true
-                    AND qb.owner_team = 'north'
-                    AND qb.kind = 'multiple_choice'
+                      AND qb.owner_team = 'north'
+                      AND qb.kind = 'multiple_choice'
     )
 );
 

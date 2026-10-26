@@ -11,6 +11,12 @@ import {
   type NorthGameState,
 } from './domain/northMultipleChoice'
 import {
+  createWordGameState,
+  transitionWordGame,
+  type GameState as SouthWordGameState,
+  type WordQuestion,
+} from './domain/southWordGame'
+import {
   closeRoomChannel,
   connectPlayerToRoom,
   createHostRoom,
@@ -51,6 +57,32 @@ const getNorthMultipleChoiceQuestions = (bankQuestions: BankQuestion[]): Multipl
       points: question.points,
     }))
 
+const getSouthWordQuestions = (
+  bankQuestions: BankQuestion[],
+  answerKeys: Record<string, string>,
+): WordQuestion[] => bankQuestions
+  .filter((question) => question.owner_team === 'south' && question.kind === 'fill_blank')
+  .map((question) => ({
+    id: question.id,
+    prompt: question.prompt,
+    expectedAnswer: answerKeys[question.id] ?? '',
+  }))
+
+const getPublicSouthGameSnapshot = (game: SouthWordGameState | null) =>
+  game
+    ? {
+        ...game,
+        context: {
+          ...game.context,
+          questions: game.context.questions.map(({ id, prompt }) => ({
+            id,
+            prompt,
+            expectedAnswer: '',
+          })),
+        },
+      }
+    : null
+
 const getModeFromHash = (hash: string): AppMode =>
   hash.replace('#', '') === 'admin' ? 'admin' : 'player'
 
@@ -73,7 +105,9 @@ function App() {
   const [questions, setQuestions] = useState<BankQuestion[]>([])
   const [answerKeys, setAnswerKeys] = useState<Record<string, string>>({})
   const [northGame, setNorthGame] = useState<NorthGameState | null>(null)
+  const [southGame, setSouthGame] = useState<SouthWordGameState | null>(null)
   const [selectedOptionId, setSelectedOptionId] = useState('')
+  const [southDraftAnswer, setSouthDraftAnswer] = useState('')
   const [clockNow, setClockNow] = useState(() => Date.now())
   const hostChannelRef = useRef<RealtimeChannel | null>(null)
   const playerChannelRef = useRef<RealtimeChannel | null>(null)
@@ -82,6 +116,7 @@ function App() {
   const questionNumberRef = useRef(1)
   const questionsRef = useRef<BankQuestion[]>([])
   const northGameRef = useRef<NorthGameState | null>(null)
+  const southGameRef = useRef<SouthWordGameState | null>(null)
   const answerKeysRef = useRef<Record<string, string>>({})
   const pendingJoinRef = useRef<{
     requestId: string
@@ -138,6 +173,7 @@ function App() {
             questionNumber: questionNumberRef.current,
             questions: questionsRef.current,
             northGame: nextGame,
+            southGame: getPublicSouthGameSnapshot(southGameRef.current),
           },
         })
       }
@@ -171,32 +207,58 @@ function App() {
         questionNumber: questionNumberRef.current,
         questions: questionsRef.current,
         northGame: northGameRef.current,
+        southGame: getPublicSouthGameSnapshot(southGameRef.current),
         ...overrides,
       },
     })
   }
 
-  const startNorthGame = () => {
+  const startBothGames = () => {
     const northQuestions = getNorthMultipleChoiceQuestions(questionsRef.current)
-    const missingAnswer = northQuestions.some((question) => {
+    const southQuestions = getSouthWordQuestions(questionsRef.current, answerKeysRef.current)
+    const missingAnswer = [...northQuestions, ...southQuestions].some((question) => {
       const answer = answerKeysRef.current[question.id]
-      return !answer || !question.options.some((option) => isNorthOptionCorrect(option.text, answer))
+      return !answer || ('options' in question
+        ? !question.options.some((option) => isNorthOptionCorrect(option.text, answer))
+        : false)
     })
     if (missingAnswer) {
-      setAdminError('Thiếu đáp án hợp lệ trong ngân hàng cho ít nhất một câu Miền Bắc.')
+      setAdminError('Thiếu đáp án trong ngân hàng cho ít nhất một câu hỏi.')
       return
     }
 
-    const game = createNorthGameState(
+    const northLobby = createNorthGameState(
       northQuestions,
       playersRef.current
         .filter((player) => player.team === 'north')
         .map((player) => player.profileId),
     )
-    northGameRef.current = game
-    setNorthGame(game)
-    if (game.status === 'lobby') dispatchNorthGame({ type: 'ADMIN_START' })
-    else setAdminError(game.status === 'error' ? game.message : 'Không thể bắt đầu trận.')
+    const southReady = createWordGameState(southQuestions)
+
+    if (northLobby.status !== 'lobby' || southReady.status !== 'ready'
+      || southCount === 0 || northCount === 0) {
+      const message = northLobby.status === 'error'
+        ? northLobby.message
+        : southReady.status === 'error'
+          ? southReady.message
+          : 'Cần ít nhất một người chơi cho mỗi đội.'
+      setAdminError(message)
+      return
+    }
+
+    const nextNorth = transitionNorthGame(northLobby, { type: 'ADMIN_START' }, adminActor)
+    const nextSouth = transitionWordGame(southReady, { type: 'START' })
+    northGameRef.current = nextNorth
+    southGameRef.current = nextSouth
+    setNorthGame(nextNorth)
+    setSouthGame(nextSouth)
+    sessionStatusRef.current = 'active'
+    setSessionStatus('active')
+    void broadcastHostState({
+      northGame: nextNorth,
+      southGame: getPublicSouthGameSnapshot(nextSouth),
+      status: 'active',
+    })
   }
 
   const submitNorthAnswer = async () => {
@@ -218,6 +280,28 @@ function App() {
     }
   }
 
+  const submitSouthAnswer = async () => {
+    const game = southGame
+    const question = game?.status === 'answering'
+      ? game.context.questions[game.context.currentIndex]
+      : undefined
+    const player = pendingPlayer
+    const channel = playerChannelRef.current
+    if (!question || !player || player.team !== 'south' || !channel || !southDraftAnswer.trim()) return
+
+    try {
+      await sendRoomEvent(channel, {
+        type: 'south-answer',
+        requestId: globalThis.crypto.randomUUID(),
+        playerId: player.profileId,
+        questionId: question.id,
+        answer: southDraftAnswer,
+      })
+    } catch (error) {
+      setJoinError(getRoomServiceErrorMessage(error, 'Không gửi được câu trả lời.'))
+    }
+  }
+
   const dispatchNorthGame = (event: NorthGameEvent, actor: NorthGameActor = adminActor) => {
     const currentGame = northGameRef.current
     if (!currentGame) return
@@ -227,7 +311,7 @@ function App() {
 
     northGameRef.current = nextGame
     setNorthGame(nextGame)
-    const nextSessionStatus = nextGame.status === 'question_active'
+    const nextSessionStatus = nextGame.status === 'question_active' || southGameRef.current?.status === 'answering'
       ? 'active'
       : nextGame.status === 'paused'
         ? 'paused'
@@ -242,9 +326,53 @@ function App() {
     })
   }
 
+  const dispatchSouthGame = (event: Parameters<typeof transitionWordGame>[1]) => {
+    const currentGame = southGameRef.current
+    if (!currentGame) return
+
+    const nextGame = transitionWordGame(currentGame, event)
+    if (nextGame === currentGame) return
+
+    southGameRef.current = nextGame
+    setSouthGame(nextGame)
+    const nextSessionStatus = northGameRef.current?.status === 'question_active' || nextGame.status === 'answering'
+      ? 'active'
+      : northGameRef.current?.status === 'paused'
+        ? 'paused'
+        : 'waiting'
+    sessionStatusRef.current = nextSessionStatus
+    setSessionStatus(nextSessionStatus)
+    void broadcastHostState({
+      southGame: getPublicSouthGameSnapshot(nextGame),
+      status: nextSessionStatus,
+    })
+  }
+
   const handleHostMessage = (message: RoomMessage) => {
     const channel = hostChannelRef.current
     if (!channel) return
+
+    if (message.type === 'south-answer' && message.playerId && message.questionId
+      && typeof message.answer === 'string'
+      && playersRef.current.some((player) => player.profileId === message.playerId && player.team === 'south')) {
+      const currentGame = southGameRef.current
+      const question = currentGame?.status === 'answering'
+        ? currentGame.context.questions[currentGame.context.currentIndex]
+        : undefined
+      if (!currentGame || !question || question.id !== message.questionId) return
+
+      const withDraft = transitionWordGame(currentGame, { type: 'ANSWER_CHANGED', value: message.answer })
+      const nextGame = transitionWordGame(withDraft, { type: 'SUBMIT_ANSWER' })
+      if (nextGame !== currentGame) {
+        southGameRef.current = nextGame
+        setSouthGame(nextGame)
+        void broadcastHostState({
+          southGame: getPublicSouthGameSnapshot(nextGame),
+          status: northGameRef.current?.status === 'question_active' ? 'active' : 'waiting',
+        })
+      }
+      return
+    }
 
     if (message.type === 'north-answer' && message.playerId && message.questionId
       && message.optionId && message.requestId
@@ -321,6 +449,10 @@ function App() {
         }
         northGameRef.current = message.state.northGame
         setNorthGame(message.state.northGame)
+      }
+      if (message.state.southGame !== undefined) {
+        southGameRef.current = message.state.southGame
+        setSouthGame(message.state.southGame)
       }
     }
 
@@ -417,8 +549,13 @@ function App() {
       playerChannelRef.current = null
 
       const bankQuestions = await loadQuestionBank()
-      const northQuestionIds = getNorthMultipleChoiceQuestions(bankQuestions).map((question) => question.id)
-      const answerKeys = await loadQuestionAnswerKeys(northQuestionIds)
+      const answerQuestionIds = bankQuestions
+        .filter((question) =>
+          question.owner_team === 'north' && question.kind === 'multiple_choice'
+          || question.owner_team === 'south' && question.kind === 'fill_blank',
+        )
+        .map((question) => question.id)
+      const answerKeys = await loadQuestionAnswerKeys(answerQuestionIds)
       const answerKeyMap = Object.fromEntries(
         answerKeys.map((answer) => [answer.question_id, answer.correct_answer]),
       )
@@ -428,6 +565,8 @@ function App() {
       setQuestions(bankQuestions)
       northGameRef.current = null
       setNorthGame(null)
+      southGameRef.current = null
+      setSouthGame(null)
       playersRef.current = []
       sessionStatusRef.current = 'waiting'
       questionNumberRef.current = bankQuestions.length > 0 ? 1 : 0
@@ -450,6 +589,7 @@ function App() {
   const northCount = getTeamMemberCount(players, 'north')
   const southCount = getTeamMemberCount(players, 'south')
   const currentNorthQuestion = northGame?.context.questions[northGame.context.currentIndex]
+  const currentSouthQuestion = southGame?.context.questions[southGame.context.currentIndex]
   const correctNorthOptionId = currentNorthQuestion
     ? currentNorthQuestion.options.find((option) =>
         isNorthOptionCorrect(option.text, answerKeys[currentNorthQuestion.id] ?? ''),
@@ -481,7 +621,16 @@ function App() {
             : northGame?.status === 'error'
               ? 'Cần kiểm tra'
               : 'Sảnh chờ'
-  const playerGameStatus = northGame?.status === 'question_active'
+  const southGameStatusLabel = southGame?.status === 'answering'
+    ? 'Câu hỏi đang mở'
+    : southGame?.status === 'feedback'
+      ? 'Đã nhận câu trả lời'
+      : southGame?.status === 'completed'
+        ? 'Đã hoàn thành'
+        : southGame?.status === 'error'
+          ? 'Cần kiểm tra'
+          : 'Sảnh chờ'
+  const playerNorthStatus = northGame?.status === 'question_active'
     ? 'Trận đang diễn ra.'
     : northGame?.status === 'answer_revealed'
       ? 'Chủ phòng đang công bố kết quả câu hỏi.'
@@ -494,6 +643,15 @@ function App() {
             : sessionStatus === 'active'
               ? 'Trận đang diễn ra.'
               : 'Đang chờ chủ phòng bắt đầu.'
+  const playerGameStatus = pendingPlayer?.team === 'south'
+    ? southGame?.status === 'answering'
+      ? 'Câu hỏi Miền Nam đang mở.'
+      : southGame?.status === 'feedback'
+        ? 'Đã ghi nhận câu trả lời Miền Nam.'
+        : southGame?.status === 'completed'
+          ? 'Trận Miền Nam đã hoàn thành.'
+          : 'Đang chờ chủ phòng bắt đầu.'
+    : playerNorthStatus
   const pageTitle = mode === 'admin'
     ? 'Phòng chờ quản trị'
     : playerStep === 'join'
@@ -664,8 +822,36 @@ function App() {
                 <p>Điểm của bạn: {northGame.context.scores[pendingPlayer.profileId] ?? 0}</p>
               </div>
             )}
-            {pendingPlayer.team === 'south' && northGame?.status === 'question_active' && (
-              <div className="question-placeholder"><p>Đội Miền Bắc đang trả lời câu hỏi.</p></div>
+            {pendingPlayer.team === 'south' && southGame && currentSouthQuestion && (
+              <div className="question-placeholder north-question-view">
+                {southGame.status === 'answering' && (
+                  <>
+                    <strong>{currentSouthQuestion.prompt}</strong>
+                    <label className="south-answer-field">
+                      <span>Đáp án</span>
+                      <input
+                        onChange={(event) => setSouthDraftAnswer(event.target.value)}
+                        value={southDraftAnswer}
+                      />
+                    </label>
+                    <button
+                      className="primary-button"
+                      disabled={!southDraftAnswer.trim()}
+                      onClick={submitSouthAnswer}
+                      type="button"
+                    >
+                      Gửi câu trả lời
+                    </button>
+                  </>
+                )}
+                {southGame.status === 'feedback' && (
+                  <p className={southGame.lastResult.correct ? 'lobby-status ready' : 'lobby-status waiting'}>
+                    {southGame.lastResult.correct ? 'Đáp án chính xác.' : 'Đáp án chưa chính xác.'}
+                  </p>
+                )}
+                {southGame.status === 'completed' && <p>Đội Miền Nam đã hoàn thành bộ câu hỏi.</p>}
+                {southGame.status === 'error' && <p className="form-error">{southGame.message}</p>}
+              </div>
             )}
           </section>
         )}
@@ -793,11 +979,13 @@ function App() {
                 {(!northGame || northGame.status === 'lobby' || northGame.status === 'error') && (
                   <button
                     className="primary-button"
-                    disabled={!createdRoomCode || northCount === 0 || getNorthMultipleChoiceQuestions(questions).length === 0}
-                    onClick={startNorthGame}
+                    disabled={!createdRoomCode || northCount === 0 || southCount === 0
+                      || getNorthMultipleChoiceQuestions(questions).length === 0
+                      || getSouthWordQuestions(questions, answerKeys).length === 0}
+                    onClick={startBothGames}
                     type="button"
                   >
-                    Bắt đầu trận
+                    Bắt đầu hai đội
                   </button>
                 )}
                 {northGame?.status === 'question_active' && (
@@ -847,6 +1035,44 @@ function App() {
               <p className="control-note">
                 Đáp án được kiểm tra tự động; điểm cộng ngay khi người chơi gửi câu trả lời.
               </p>
+            </section>
+
+            <section className="panel-card host-controls">
+              <div className="section-heading">
+                <div>
+                  <p className="section-kicker">Quản lý Miền Nam</p>
+                  <h3>Điều khiển điền từ</h3>
+                </div>
+                <span className={`session-state ${southGame?.status ?? 'lobby'}`}>{southGameStatusLabel}</span>
+              </div>
+              {currentSouthQuestion && (
+                <div className="question-placeholder">
+                  <strong>{currentSouthQuestion.prompt}</strong>
+                  {southGame?.status === 'feedback' && (
+                    <p>
+                      {southGame.lastResult.correct ? 'Đáp án chính xác.' : 'Đáp án chưa chính xác.'}
+                      {' '}Đáp án: {answerKeys[currentSouthQuestion.id] ?? 'Chưa cấu hình'}
+                    </p>
+                  )}
+                </div>
+              )}
+              {southGame?.status === 'error' && <p className="form-error" role="alert">{southGame.message}</p>}
+              <div className="action-row host-actions">
+                {southGame?.status === 'feedback' && (
+                  <button
+                    className="primary-button"
+                    onClick={() => {
+                      setSouthDraftAnswer('')
+                      dispatchSouthGame({ type: 'NEXT_QUESTION' })
+                    }}
+                    type="button"
+                  >
+                    Câu tiếp theo
+                  </button>
+                )}
+                {southGame?.status === 'completed' && <strong>Miền Nam đã hoàn thành.</strong>}
+              </div>
+              <p className="control-note">Miền Nam tiến triển độc lập với đồng hồ trắc nghiệm Miền Bắc.</p>
             </section>
           </div>
         )}

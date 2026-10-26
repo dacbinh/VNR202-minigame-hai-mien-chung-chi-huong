@@ -1,6 +1,7 @@
 import type { LobbyMember, LobbyTeam } from '../domain/lobbyRules'
 import type { RealtimeChannel } from '@supabase/supabase-js'
 import type { NorthGameState } from '../domain/northMultipleChoice'
+import type { GameState as SouthWordGameState } from '../domain/southWordGame'
 import { supabaseClient } from './supabase'
 
 const getClient = () => {
@@ -66,10 +67,12 @@ export type RoomMessage = {
     questionNumber: number
     questions: BankQuestion[]
     northGame?: NorthGameState | null
+    southGame?: SouthWordGameState | null
   }
   playerId?: string
   questionId?: string
   optionId?: string
+  answer?: string
 }
 
 const roomChannelName = (code: string) => `vnr-room:${code}`
