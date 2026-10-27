@@ -11,8 +11,8 @@ import {
 } from './southWordGame'
 
 const questions: WordQuestion[] = [
-  { id: 'q1', prompt: 'Điền từ thứ nhất', expectedAnswer: 'Hà Nội' },
-  { id: 'q2', prompt: 'Điền từ thứ hai', expectedAnswer: 'Huế' },
+  { id: 'q1', prompt: 'Điền từ thứ nhất', expectedAnswer: 'Hà Nội', unlockCost: 80 },
+  { id: 'q2', prompt: 'Điền từ thứ hai', expectedAnswer: 'Huế', unlockCost: 100 },
 ]
 
 const startGame = (gameQuestions = questions) =>
@@ -35,7 +35,7 @@ describe('createWordGameState', () => {
   })
 
   it('rejects invalid question data', () => {
-    const state = createWordGameState([{ id: '', prompt: 'Prompt', expectedAnswer: 'Answer' }])
+    const state = createWordGameState([{ id: '', prompt: 'Prompt', expectedAnswer: 'Answer', unlockCost: 50 }])
 
     expect(state.status).toBe('error')
   })
@@ -90,7 +90,7 @@ describe('transitionWordGame', () => {
 
   it('accepts Dong Khoi for Đồng Khởi and creates one slot per letter', () => {
     const state = answer(
-      startGame([{ id: 'q1', prompt: 'Điền địa danh', expectedAnswer: 'Đồng Khởi' }]),
+      startGame([{ id: 'q1', prompt: 'Điền địa danh', expectedAnswer: 'Đồng Khởi', unlockCost: 60 }]),
       'dong khoi',
     )
 

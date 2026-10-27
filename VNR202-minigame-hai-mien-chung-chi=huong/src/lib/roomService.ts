@@ -56,6 +56,12 @@ export type BankQuestion = {
   points: number
 }
 
+export type SouthWallet = {
+  balance: number
+  lastAid: number
+  unlockedQuestionIds: string[]
+}
+
 export type RoomMessage = {
   type: string
   requestId?: string
@@ -66,6 +72,7 @@ export type RoomMessage = {
     status: 'waiting' | 'active' | 'paused'
     questionNumber: number
     questions: BankQuestion[]
+    southWallet?: SouthWallet
     northGame?: NorthGameState | null
     southGame?: SouthWordGameState | null
   }

@@ -2,6 +2,7 @@ export interface WordQuestion {
   id: string
   prompt: string
   expectedAnswer: string
+  unlockCost: number
   answerPattern?: number[]
 }
 
@@ -52,6 +53,8 @@ const hasValidQuestionData = (question: WordQuestion) =>
   question.id.trim().length > 0
   && question.prompt.trim().length > 0
   && normalizeWordAnswer(question.expectedAnswer).length > 0
+  && Number.isInteger(question.unlockCost)
+  && question.unlockCost > 0
 
 export const createWordGameState = (questions: WordQuestion[]): GameState => {
   const context: GameContext = {

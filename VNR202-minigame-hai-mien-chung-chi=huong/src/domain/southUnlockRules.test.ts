@@ -51,6 +51,16 @@ describe('canUnlockQuestion', () => {
       }),
     ).toBe(false)
   })
+
+  it('không cho phép mở khóa câu hỏi không có giá', () => {
+    expect(canUnlockQuestion({
+      southTeamPoints: 120,
+      unlockCost: 0,
+      questionId: 'q-1',
+      unlockedQuestionIds: [],
+      sessionActive: true,
+    })).toBe(false)
+  })
 })
 
 describe('applySouthUnlock', () => {
@@ -93,6 +103,17 @@ describe('applySouthUnlock', () => {
 
     expect(insufficient.allowed).toBe(false)
     expect(insufficient.updatedPoints).toBe(50)
+
+    const freeQuestion = applySouthUnlock({
+      southTeamPoints: 120,
+      unlockCost: 0,
+      questionId: 'q-4',
+      unlockedQuestionIds: [],
+      sessionActive: true,
+    })
+
+    expect(freeQuestion.allowed).toBe(false)
+    expect(freeQuestion.updatedPoints).toBe(120)
   })
 })
 

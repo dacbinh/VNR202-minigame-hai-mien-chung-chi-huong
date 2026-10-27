@@ -14,7 +14,7 @@ export type SouthUnlockResult = {
 }
 
 export const canUnlockQuestion = (state: SouthUnlockState): boolean => {
-  if (!state.sessionActive) {
+  if (!state.sessionActive || !Number.isInteger(state.unlockCost) || state.unlockCost <= 0) {
     return false
   }
 
@@ -44,7 +44,8 @@ export const shouldIgnoreDuplicateUnlock = (
 
 export const applySouthUnlock = (state: SouthUnlockState): SouthUnlockResult => {
   const alreadyUnlocked = state.unlockedQuestionIds.includes(state.questionId)
-  if (!state.sessionActive || alreadyUnlocked || state.southTeamPoints < state.unlockCost) {
+  if (!state.sessionActive || alreadyUnlocked || !Number.isInteger(state.unlockCost)
+    || state.unlockCost <= 0 || state.southTeamPoints < state.unlockCost) {
     return {
       allowed: false,
       updatedPoints: state.southTeamPoints,

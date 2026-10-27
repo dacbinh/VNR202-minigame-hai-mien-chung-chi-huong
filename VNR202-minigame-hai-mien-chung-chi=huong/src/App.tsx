@@ -17,6 +17,7 @@ import {
   type GameState as SouthWordGameState,
   type WordQuestion,
 } from './domain/southWordGame'
+import { applySouthUnlock } from './domain/southUnlockRules'
 import {
   closeRoomChannel,
   connectPlayerToRoom,
@@ -27,6 +28,7 @@ import {
   sendRoomEvent,
   type BankQuestion,
   type RoomMessage,
+  type SouthWallet,
 } from './lib/roomService'
 import { hasSupabaseConfig } from './lib/supabase'
 import './App.css'
@@ -143,24 +145,29 @@ const getSouthWordQuestions = (
     id: question.id,
     prompt: question.prompt,
     expectedAnswer: answerKeys[question.id] ?? '',
+    unlockCost: question.unlock_cost,
     answerPattern: getWordAnswerPattern(answerKeys[question.id] ?? ''),
   }))
 
-const getPublicSouthGameSnapshot = (game: SouthWordGameState | null) =>
+const getPublicSouthGameSnapshot = (game: SouthWordGameState | null, unlockedQuestionIds: string[]) =>
   game
     ? {
         ...game,
         context: {
           ...game.context,
-          questions: game.context.questions.map(({ id, prompt, answerPattern }) => ({
-            id,
-            prompt,
-            expectedAnswer: '',
-            answerPattern,
-          })),
+          questions: game.context.questions.map((question) => unlockedQuestionIds.includes(question.id)
+            ? { ...question, expectedAnswer: '' }
+            : { ...question, prompt: '', expectedAnswer: '', answerPattern: [] }),
         },
       }
     : null
+
+const getPublicQuestionBankSnapshot = (bankQuestions: BankQuestion[], unlockedQuestionIds: string[]) =>
+  bankQuestions.map((question) => question.owner_team === 'south'
+    && question.kind === 'fill_blank'
+    && !unlockedQuestionIds.includes(question.id)
+    ? { ...question, prompt: '', choices: [] }
+    : question)
 
 const getModeFromHash = (hash: string): AppMode =>
   hash.replace('#', '') === 'admin' ? 'admin' : 'player'
@@ -185,6 +192,7 @@ function App() {
   const [answerKeys, setAnswerKeys] = useState<Record<string, string>>({})
   const [northGame, setNorthGame] = useState<NorthGameState | null>(null)
   const [southGame, setSouthGame] = useState<SouthWordGameState | null>(null)
+  const [southWallet, setSouthWallet] = useState<SouthWallet>({ balance: 0, lastAid: 0, unlockedQuestionIds: [] })
   const [selectedOptionId, setSelectedOptionId] = useState('')
   const [southDraftAnswer, setSouthDraftAnswer] = useState('')
   const [clockNow, setClockNow] = useState(() => Date.now())
@@ -196,6 +204,7 @@ function App() {
   const questionsRef = useRef<BankQuestion[]>([])
   const northGameRef = useRef<NorthGameState | null>(null)
   const southGameRef = useRef<SouthWordGameState | null>(null)
+  const southWalletRef = useRef<SouthWallet>({ balance: 0, lastAid: 0, unlockedQuestionIds: [] })
   const answerKeysRef = useRef<Record<string, string>>({})
   const pendingJoinRef = useRef<{
     requestId: string
@@ -240,7 +249,7 @@ function App() {
       setNorthGame(nextGame)
       const nextStatus = nextGame.status === 'question_active' ? 'active' : 'waiting'
       sessionStatusRef.current = nextStatus
-      setSessionStatus(nextStatus)
+        setSessionStatus(nextStatus)
       questionNumberRef.current = nextGame.context.currentIndex + 1
       const channel = hostChannelRef.current
       if (channel) {
@@ -250,9 +259,10 @@ function App() {
             players: playersRef.current,
             status: nextStatus,
             questionNumber: questionNumberRef.current,
-            questions: questionsRef.current,
+            questions: getPublicQuestionBankSnapshot(questionsRef.current, southWalletRef.current.unlockedQuestionIds),
+            southWallet: southWalletRef.current,
             northGame: nextGame,
-            southGame: getPublicSouthGameSnapshot(southGameRef.current),
+            southGame: getPublicSouthGameSnapshot(southGameRef.current, southWalletRef.current.unlockedQuestionIds),
           },
         })
       }
@@ -284,9 +294,10 @@ function App() {
         players: playersRef.current,
         status: sessionStatusRef.current,
         questionNumber: questionNumberRef.current,
-        questions: questionsRef.current,
+        questions: getPublicQuestionBankSnapshot(questionsRef.current, southWalletRef.current.unlockedQuestionIds),
+        southWallet: southWalletRef.current,
         northGame: northGameRef.current,
-        southGame: getPublicSouthGameSnapshot(southGameRef.current),
+        southGame: getPublicSouthGameSnapshot(southGameRef.current, southWalletRef.current.unlockedQuestionIds),
         ...overrides,
       },
     })
@@ -303,6 +314,10 @@ function App() {
     })
     if (missingAnswer) {
       setAdminError('Thiếu đáp án trong ngân hàng cho ít nhất một câu hỏi.')
+      return
+    }
+    if (southQuestions.some((question) => question.unlockCost <= 0)) {
+      setAdminError('Mỗi câu hỏi Miền Nam cần có giá mở khóa lớn hơn 0.')
       return
     }
 
@@ -326,7 +341,10 @@ function App() {
     }
 
     const nextNorth = transitionNorthGame(northLobby, { type: 'ADMIN_START' }, adminActor)
-    const nextSouth = transitionWordGame(southReady, { type: 'START' })
+    const nextSouth = southReady
+    const emptyWallet: SouthWallet = { balance: 0, lastAid: 0, unlockedQuestionIds: [] }
+    southWalletRef.current = emptyWallet
+    setSouthWallet(emptyWallet)
     northGameRef.current = nextNorth
     southGameRef.current = nextSouth
     setNorthGame(nextNorth)
@@ -335,7 +353,7 @@ function App() {
     setSessionStatus('active')
     void broadcastHostState({
       northGame: nextNorth,
-      southGame: getPublicSouthGameSnapshot(nextSouth),
+      southGame: getPublicSouthGameSnapshot(nextSouth, emptyWallet.unlockedQuestionIds),
       status: 'active',
     })
   }
@@ -381,12 +399,49 @@ function App() {
     }
   }
 
+  const requestSouthUnlock = async () => {
+    const game = southGame
+    const player = pendingPlayer
+    const channel = playerChannelRef.current
+    const targetIndex = game?.status === 'ready'
+      ? 0
+      : game?.status === 'feedback'
+        ? game.context.currentIndex + 1
+        : -1
+    const question = targetIndex >= 0 ? game?.context.questions[targetIndex] : undefined
+    if (!question || !player || player.team !== 'south' || !channel) return
+
+    try {
+      await sendRoomEvent(channel, {
+        type: 'south-unlock',
+        requestId: globalThis.crypto.randomUUID(),
+        playerId: player.profileId,
+        questionId: question.id,
+      })
+    } catch (error) {
+      setJoinError(getRoomServiceErrorMessage(error, 'Không thể mở khóa câu hỏi.'))
+    }
+  }
+
   const dispatchNorthGame = (event: NorthGameEvent, actor: NorthGameActor = adminActor) => {
     const currentGame = northGameRef.current
     if (!currentGame) return
 
     const nextGame = transitionNorthGame(currentGame, event, actor)
     if (nextGame === currentGame) return
+
+    let updatedWallet = southWalletRef.current
+    if (event.type === 'SUBMIT_ANSWER' && actor.role === 'player'
+      && !currentGame.context.answers.some((answer) =>
+        answer.playerId === actor.id && answer.questionId === event.questionId)) {
+      const awardedPoints = nextGame.context.answers.find((answer) =>
+        answer.playerId === actor.id && answer.questionId === event.questionId)?.pointsAwarded ?? 0
+      if (awardedPoints > 0) {
+        updatedWallet = { ...updatedWallet, balance: updatedWallet.balance + awardedPoints, lastAid: awardedPoints }
+        southWalletRef.current = updatedWallet
+        setSouthWallet(updatedWallet)
+      }
+    }
 
     northGameRef.current = nextGame
     setNorthGame(nextGame)
@@ -400,6 +455,7 @@ function App() {
     questionNumberRef.current = nextGame.context.currentIndex + 1
     void broadcastHostState({
       northGame: nextGame,
+      southWallet: updatedWallet,
       status: nextSessionStatus,
       questionNumber: questionNumberRef.current,
     })
@@ -422,7 +478,7 @@ function App() {
     sessionStatusRef.current = nextSessionStatus
     setSessionStatus(nextSessionStatus)
     void broadcastHostState({
-      southGame: getPublicSouthGameSnapshot(nextGame),
+      southGame: getPublicSouthGameSnapshot(nextGame, southWalletRef.current.unlockedQuestionIds),
       status: nextSessionStatus,
     })
   }
@@ -439,6 +495,7 @@ function App() {
         ? currentGame.context.questions[currentGame.context.currentIndex]
         : undefined
       if (!currentGame || !question || question.id !== message.questionId) return
+      if (!southWalletRef.current.unlockedQuestionIds.includes(question.id)) return
 
       const withDraft = transitionWordGame(currentGame, { type: 'ANSWER_CHANGED', value: message.answer })
       const nextGame = transitionWordGame(withDraft, { type: 'SUBMIT_ANSWER' })
@@ -446,10 +503,52 @@ function App() {
         southGameRef.current = nextGame
         setSouthGame(nextGame)
         void broadcastHostState({
-          southGame: getPublicSouthGameSnapshot(nextGame),
+          southGame: getPublicSouthGameSnapshot(nextGame, southWalletRef.current.unlockedQuestionIds),
           status: northGameRef.current?.status === 'question_active' ? 'active' : 'waiting',
         })
       }
+      return
+    }
+
+    if (message.type === 'south-unlock' && message.playerId && message.questionId
+      && message.requestId
+      && playersRef.current.some((player) => player.profileId === message.playerId && player.team === 'south')) {
+      const currentGame = southGameRef.current
+      const targetIndex = currentGame?.status === 'ready'
+        ? 0
+        : currentGame?.status === 'feedback'
+          ? currentGame.context.currentIndex + 1
+          : -1
+      const question = targetIndex >= 0 ? currentGame?.context.questions[targetIndex] : undefined
+      if (!currentGame || !question || question.id !== message.questionId) return
+
+      const unlock = applySouthUnlock({
+        southTeamPoints: southWalletRef.current.balance,
+        unlockCost: question.unlockCost,
+        questionId: question.id,
+        unlockedQuestionIds: southWalletRef.current.unlockedQuestionIds,
+        sessionActive: true,
+      })
+      if (!unlock.allowed) return
+
+      const nextGame = currentGame.status === 'ready'
+        ? transitionWordGame(currentGame, { type: 'START' })
+        : transitionWordGame(currentGame, { type: 'NEXT_QUESTION' })
+      if (nextGame.status !== 'answering') return
+
+      const nextWallet = {
+        ...southWalletRef.current,
+        balance: unlock.updatedPoints,
+        unlockedQuestionIds: unlock.unlockedQuestionIds,
+      }
+      southWalletRef.current = nextWallet
+      setSouthWallet(nextWallet)
+      southGameRef.current = nextGame
+      setSouthGame(nextGame)
+      void broadcastHostState({
+        southGame: getPublicSouthGameSnapshot(nextGame, nextWallet.unlockedQuestionIds),
+        status: northGameRef.current?.status === 'question_active' ? 'active' : 'waiting',
+      })
       return
     }
 
@@ -538,6 +637,10 @@ function App() {
         }
         southGameRef.current = message.state.southGame
         setSouthGame(message.state.southGame)
+      }
+      if (message.state.southWallet) {
+        southWalletRef.current = message.state.southWallet
+        setSouthWallet(message.state.southWallet)
       }
     }
 
@@ -652,6 +755,9 @@ function App() {
       setNorthGame(null)
       southGameRef.current = null
       setSouthGame(null)
+      const emptyWallet: SouthWallet = { balance: 0, lastAid: 0, unlockedQuestionIds: [] }
+      southWalletRef.current = emptyWallet
+      setSouthWallet(emptyWallet)
       playersRef.current = []
       sessionStatusRef.current = 'waiting'
       questionNumberRef.current = bankQuestions.length > 0 ? 1 : 0
@@ -675,6 +781,11 @@ function App() {
   const southCount = getTeamMemberCount(players, 'south')
   const currentNorthQuestion = northGame?.context.questions[northGame.context.currentIndex]
   const currentSouthQuestion = southGame?.context.questions[southGame.context.currentIndex]
+  const southUnlockQuestion = southGame?.status === 'ready'
+    ? southGame.context.questions[0]
+    : southGame?.status === 'feedback'
+      ? southGame.context.questions[southGame.context.currentIndex + 1]
+      : undefined
   const correctNorthOptionId = currentNorthQuestion
     ? currentNorthQuestion.options.find((option) =>
         isNorthOptionCorrect(option.text, answerKeys[currentNorthQuestion.id] ?? ''),
@@ -710,6 +821,8 @@ function App() {
     ? 'Câu hỏi đang mở'
     : southGame?.status === 'feedback'
       ? 'Đã nhận câu trả lời'
+      : southGame?.status === 'ready'
+        ? 'Chờ mở khóa'
       : southGame?.status === 'completed'
         ? 'Đã hoàn thành'
         : southGame?.status === 'error'
@@ -909,6 +1022,13 @@ function App() {
             )}
             {pendingPlayer.team === 'south' && southGame && currentSouthQuestion && (
               <div className="question-placeholder north-question-view">
+                <div className="player-summary">
+                  <span>Số dư Miền Nam</span>
+                  <strong>{southWallet.balance} điểm</strong>
+                </div>
+                {southWallet.lastAid > 0 && (
+                  <p className="lobby-status ready">+{southWallet.lastAid} nhận viện trợ từ Miền Bắc</p>
+                )}
                 {southGame.status === 'answering' && (
                   <>
                     <strong>{currentSouthQuestion.prompt}</strong>
@@ -934,6 +1054,23 @@ function App() {
                   <p className={southGame.lastResult.correct ? 'lobby-status ready' : 'lobby-status waiting'}>
                     {southGame.lastResult.correct ? 'Đáp án chính xác.' : 'Đáp án chưa chính xác.'}
                   </p>
+                )}
+                {(southGame.status === 'ready' || southGame.status === 'feedback') && southUnlockQuestion && (
+                  <>
+                    <strong>Câu hỏi đang khóa</strong>
+                    <p>Chi phí mở khóa câu hỏi tiếp theo: {southUnlockQuestion.unlockCost} điểm.</p>
+                    <button
+                      className="primary-button"
+                      disabled={southWallet.balance < southUnlockQuestion.unlockCost}
+                      onClick={requestSouthUnlock}
+                      type="button"
+                    >
+                      Mở khóa câu hỏi
+                    </button>
+                    {southWallet.balance < southUnlockQuestion.unlockCost && (
+                      <p className="control-note">Cần thêm {southUnlockQuestion.unlockCost - southWallet.balance} điểm viện trợ từ Miền Bắc.</p>
+                    )}
+                  </>
                 )}
                 {southGame.status === 'completed' && <p>Đội Miền Nam đã hoàn thành bộ câu hỏi.</p>}
                 {southGame.status === 'error' && <p className="form-error">{southGame.message}</p>}
@@ -1134,6 +1271,7 @@ function App() {
               {currentSouthQuestion && (
                 <div className="question-placeholder">
                   <strong>{currentSouthQuestion.prompt}</strong>
+                  <p>Chi phí mở khóa: {currentSouthQuestion.unlockCost} điểm</p>
                   {southGame?.status === 'feedback' && (
                     <p>
                       {southGame.lastResult.correct ? 'Đáp án chính xác.' : 'Đáp án chưa chính xác.'}
@@ -1144,7 +1282,7 @@ function App() {
               )}
               {southGame?.status === 'error' && <p className="form-error" role="alert">{southGame.message}</p>}
               <div className="action-row host-actions">
-                {southGame?.status === 'feedback' && (
+                {southGame?.status === 'feedback' && !southUnlockQuestion && (
                   <button
                     className="primary-button"
                     onClick={() => {
@@ -1153,7 +1291,7 @@ function App() {
                     }}
                     type="button"
                   >
-                    Câu tiếp theo
+                    Hoàn tất
                   </button>
                 )}
                 {southGame?.status === 'completed' && <strong>Miền Nam đã hoàn thành.</strong>}
