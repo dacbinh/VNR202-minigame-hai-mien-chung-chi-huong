@@ -17,6 +17,7 @@ export interface GameContext {
   currentIndex: number
   draftAnswer: string
   results: GameResult[]
+  completedQuestionIds?: string[]
 }
 
 export type GameState =
@@ -32,6 +33,8 @@ export type GameEvent =
   | { type: 'SUBMIT_ANSWER' }
   | { type: 'NEXT_QUESTION' }
   | { type: 'RESTART' }
+  | { type: 'SELECT_QUESTION'; questionId: string }
+  | { type: 'RETURN_TO_CARDS' }
 
 const normalizeWordAnswer = (value: string) => value
   .normalize('NFD')
@@ -62,6 +65,7 @@ export const createWordGameState = (questions: WordQuestion[]): GameState => {
     currentIndex: 0,
     draftAnswer: '',
     results: [],
+    completedQuestionIds: [],
   }
 
   if (questions.some((question) => !hasValidQuestionData(question))) {
@@ -85,6 +89,30 @@ export const transitionWordGame = (state: GameState, event: GameEvent): GameStat
       }
     }
 
+    case 'SELECT_QUESTION': {
+      const targetIndex = state.context.questions.findIndex((q) => q.id === event.questionId)
+      if (targetIndex === -1) return state
+
+      return {
+        status: 'answering',
+        context: {
+          ...state.context,
+          currentIndex: targetIndex,
+          draftAnswer: '',
+        },
+      }
+    }
+
+    case 'RETURN_TO_CARDS': {
+      return {
+        status: 'ready',
+        context: {
+          ...state.context,
+          draftAnswer: '',
+        },
+      }
+    }
+
     case 'ANSWER_CHANGED': {
       if (state.status !== 'answering') return state
       return {
@@ -103,15 +131,25 @@ export const transitionWordGame = (state: GameState, event: GameEvent): GameStat
 
       if (normalizeWordAnswer(state.context.draftAnswer) === '') return state
 
+      const isCorrect = isWordAnswerCorrect(state.context.draftAnswer, question.expectedAnswer)
       const result: GameResult = {
         questionId: question.id,
         submittedAnswer: state.context.draftAnswer,
-        correct: isWordAnswerCorrect(state.context.draftAnswer, question.expectedAnswer),
+        correct: isCorrect,
       }
+
+      const existingCompleted = state.context.completedQuestionIds ?? []
+      const nextCompleted = isCorrect && !existingCompleted.includes(question.id)
+        ? [...existingCompleted, question.id]
+        : existingCompleted
 
       return {
         status: 'feedback',
-        context: { ...state.context, results: [...state.context.results, result] },
+        context: {
+          ...state.context,
+          results: [...state.context.results, result],
+          completedQuestionIds: nextCompleted,
+        },
         lastResult: result,
       }
     }

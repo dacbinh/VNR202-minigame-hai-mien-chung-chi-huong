@@ -11,6 +11,7 @@ import {
   type NorthGameState,
 } from './domain/northMultipleChoice'
 import {
+  calculateWordGameCompletion,
   createWordGameState,
   getWordAnswerPattern,
   transitionWordGame,
@@ -342,7 +343,12 @@ function App() {
 
     const nextNorth = transitionNorthGame(northLobby, { type: 'ADMIN_START' }, adminActor)
     const nextSouth = southReady
-    const emptyWallet: SouthWallet = { balance: 0, lastAid: 0, unlockedQuestionIds: [] }
+    const emptyWallet: SouthWallet = {
+      balance: 0,
+      lastAid: 0,
+      unlockedQuestionIds: [],
+      completedQuestionIds: [],
+    }
     southWalletRef.current = emptyWallet
     setSouthWallet(emptyWallet)
     northGameRef.current = nextNorth
@@ -354,6 +360,7 @@ function App() {
     void broadcastHostState({
       northGame: nextNorth,
       southGame: getPublicSouthGameSnapshot(nextSouth, emptyWallet.unlockedQuestionIds),
+      southWallet: emptyWallet,
       status: 'active',
     })
   }
@@ -399,27 +406,36 @@ function App() {
     }
   }
 
-  const requestSouthUnlock = async () => {
-    const game = southGame
+  const requestSouthUnlock = async (questionId: string) => {
     const player = pendingPlayer
     const channel = playerChannelRef.current
-    const targetIndex = game?.status === 'ready'
-      ? 0
-      : game?.status === 'feedback'
-        ? game.context.currentIndex + 1
-        : -1
-    const question = targetIndex >= 0 ? game?.context.questions[targetIndex] : undefined
-    if (!question || !player || player.team !== 'south' || !channel) return
+    if (!player || player.team !== 'south' || !channel) return
 
     try {
       await sendRoomEvent(channel, {
         type: 'south-unlock',
         requestId: globalThis.crypto.randomUUID(),
         playerId: player.profileId,
-        questionId: question.id,
+        questionId,
       })
     } catch (error) {
       setJoinError(getRoomServiceErrorMessage(error, 'Không thể mở khóa câu hỏi.'))
+    }
+  }
+
+  const returnSouthToCards = async () => {
+    const player = pendingPlayer
+    const channel = playerChannelRef.current
+    if (!player || player.team !== 'south' || !channel) return
+
+    try {
+      await sendRoomEvent(channel, {
+        type: 'south-return-cards',
+        requestId: globalThis.crypto.randomUUID(),
+        playerId: player.profileId,
+      })
+    } catch (error) {
+      setJoinError(getRoomServiceErrorMessage(error, 'Không thể quay lại màn hình chọn câu hỏi.'))
     }
   }
 
@@ -499,11 +515,24 @@ function App() {
 
       const withDraft = transitionWordGame(currentGame, { type: 'ANSWER_CHANGED', value: message.answer })
       const nextGame = transitionWordGame(withDraft, { type: 'SUBMIT_ANSWER' })
-      if (nextGame !== currentGame) {
+      if (nextGame !== currentGame && nextGame.status === 'feedback') {
+        const isCorrect = nextGame.lastResult.correct
+        const prevCompleted = southWalletRef.current.completedQuestionIds ?? []
+        const nextCompleted = isCorrect && !prevCompleted.includes(question.id)
+          ? [...prevCompleted, question.id]
+          : prevCompleted
+
+        const nextWallet: SouthWallet = {
+          ...southWalletRef.current,
+          completedQuestionIds: nextCompleted,
+        }
+        southWalletRef.current = nextWallet
+        setSouthWallet(nextWallet)
         southGameRef.current = nextGame
         setSouthGame(nextGame)
         void broadcastHostState({
           southGame: getPublicSouthGameSnapshot(nextGame, southWalletRef.current.unlockedQuestionIds),
+          southWallet: nextWallet,
           status: northGameRef.current?.status === 'question_active' ? 'active' : 'waiting',
         })
       }
@@ -514,13 +543,10 @@ function App() {
       && message.requestId
       && playersRef.current.some((player) => player.profileId === message.playerId && player.team === 'south')) {
       const currentGame = southGameRef.current
-      const targetIndex = currentGame?.status === 'ready'
-        ? 0
-        : currentGame?.status === 'feedback'
-          ? currentGame.context.currentIndex + 1
-          : -1
-      const question = targetIndex >= 0 ? currentGame?.context.questions[targetIndex] : undefined
-      if (!currentGame || !question || question.id !== message.questionId) return
+      if (!currentGame) return
+
+      const question = currentGame.context.questions.find((q) => q.id === message.questionId)
+      if (!question) return
 
       const unlock = applySouthUnlock({
         southTeamPoints: southWalletRef.current.balance,
@@ -531,15 +557,13 @@ function App() {
       })
       if (!unlock.allowed) return
 
-      const nextGame = currentGame.status === 'ready'
-        ? transitionWordGame(currentGame, { type: 'START' })
-        : transitionWordGame(currentGame, { type: 'NEXT_QUESTION' })
+      const nextGame = transitionWordGame(currentGame, { type: 'SELECT_QUESTION', questionId: question.id })
       if (nextGame.status !== 'answering') return
 
-      const nextWallet = {
+      const nextWallet: SouthWallet = {
         ...southWalletRef.current,
         balance: unlock.updatedPoints,
-        unlockedQuestionIds: unlock.unlockedQuestionIds,
+        unlockedQuestionIds: [question.id],
       }
       southWalletRef.current = nextWallet
       setSouthWallet(nextWallet)
@@ -547,6 +571,29 @@ function App() {
       setSouthGame(nextGame)
       void broadcastHostState({
         southGame: getPublicSouthGameSnapshot(nextGame, nextWallet.unlockedQuestionIds),
+        southWallet: nextWallet,
+        status: northGameRef.current?.status === 'question_active' ? 'active' : 'waiting',
+      })
+      return
+    }
+
+    if (message.type === 'south-return-cards' && message.playerId
+      && playersRef.current.some((player) => player.profileId === message.playerId && player.team === 'south')) {
+      const currentGame = southGameRef.current
+      if (!currentGame) return
+
+      const nextGame = transitionWordGame(currentGame, { type: 'RETURN_TO_CARDS' })
+      const nextWallet: SouthWallet = {
+        ...southWalletRef.current,
+        unlockedQuestionIds: [],
+      }
+      southWalletRef.current = nextWallet
+      setSouthWallet(nextWallet)
+      southGameRef.current = nextGame
+      setSouthGame(nextGame)
+      void broadcastHostState({
+        southGame: getPublicSouthGameSnapshot(nextGame, []),
+        southWallet: nextWallet,
         status: northGameRef.current?.status === 'question_active' ? 'active' : 'waiting',
       })
       return
@@ -633,6 +680,9 @@ function App() {
         if (message.state.southGame?.status === 'answering'
           && (!currentGame || currentGame.status !== 'answering'
             || message.state.southGame.context.currentIndex !== currentGame.context.currentIndex)) {
+          setSouthDraftAnswer('')
+        }
+        if (message.state.southGame?.status === 'ready') {
           setSouthDraftAnswer('')
         }
         southGameRef.current = message.state.southGame
@@ -781,11 +831,7 @@ function App() {
   const southCount = getTeamMemberCount(players, 'south')
   const currentNorthQuestion = northGame?.context.questions[northGame.context.currentIndex]
   const currentSouthQuestion = southGame?.context.questions[southGame.context.currentIndex]
-  const southUnlockQuestion = southGame?.status === 'ready'
-    ? southGame.context.questions[0]
-    : southGame?.status === 'feedback'
-      ? southGame.context.questions[southGame.context.currentIndex + 1]
-      : undefined
+  const completedSouthQuestionIds = southWallet.completedQuestionIds ?? southGame?.context.completedQuestionIds ?? []
   const correctNorthOptionId = currentNorthQuestion
     ? currentNorthQuestion.options.find((option) =>
         isNorthOptionCorrect(option.text, answerKeys[currentNorthQuestion.id] ?? ''),
@@ -822,7 +868,7 @@ function App() {
     : southGame?.status === 'feedback'
       ? 'Đã nhận câu trả lời'
       : southGame?.status === 'ready'
-        ? 'Chờ mở khóa'
+        ? 'Chọn câu hỏi'
       : southGame?.status === 'completed'
         ? 'Đã hoàn thành'
         : southGame?.status === 'error'
@@ -1020,59 +1066,194 @@ function App() {
                 <p>Điểm của bạn: {northGame.context.scores[pendingPlayer.profileId] ?? 0}</p>
               </div>
             )}
-            {pendingPlayer.team === 'south' && southGame && currentSouthQuestion && (
-              <div className="question-placeholder north-question-view">
-                <div className="player-summary">
-                  <span>Số dư Miền Nam</span>
-                  <strong>{southWallet.balance} điểm</strong>
+            {pendingPlayer.team === 'south' && southGame && (
+              <div className="south-player-container">
+                <div className="south-hud panel-card">
+                  <div className="south-hud-row">
+                    <div>
+                      <p className="section-kicker">Mặt trận Miền Nam — Tiền tuyến</p>
+                      <h3>Giải mã mật mã</h3>
+                    </div>
+                    <div className="south-points-badge">
+                      <span>Điểm viện trợ Miền Bắc</span>
+                      <strong>{southWallet.balance} điểm</strong>
+                    </div>
+                  </div>
+                  {southWallet.lastAid > 0 && (
+                    <p className="lobby-status ready aid-notice">+{southWallet.lastAid} điểm viện trợ vừa chuyển từ Miền Bắc</p>
+                  )}
+                  <div className="south-progress-bar-container">
+                    <div className="south-progress-label">
+                      <span>Tiến độ hoàn thành:</span>
+                      <strong>{completedSouthQuestionIds.length} / {southGame.context.questions.length} câu</strong>
+                    </div>
+                    <div className="south-progress-track">
+                      <div
+                        className="south-progress-fill"
+                        style={{
+                          width: `${calculateWordGameCompletion(completedSouthQuestionIds.length, southGame.context.questions.length)}%`
+                        }}
+                      />
+                    </div>
+                  </div>
                 </div>
-                {southWallet.lastAid > 0 && (
-                  <p className="lobby-status ready">+{southWallet.lastAid} nhận viện trợ từ Miền Bắc</p>
+
+                {/* 1. SELECTION SCREEN (CARDS) */}
+                {southGame.status === 'ready' && (
+                  <div className="south-cards-section">
+                    <div className="south-cards-heading">
+                      <h4>Chọn mật mã câu hỏi</h4>
+                      <p>Dùng điểm viện trợ từ Miền Bắc để mở khóa mật mã. Trả lời đúng để ghi nhận hoàn thành. Nếu trả lời sai, mật mã sẽ ẩn lại và điểm bị tiêu hao.</p>
+                    </div>
+
+                    <div className="south-cards-grid">
+                      {southGame.context.questions.map((question, index) => {
+                        const isCompleted = completedSouthQuestionIds.includes(question.id)
+                        const canAfford = southWallet.balance >= question.unlockCost
+                        const missingPoints = Math.max(0, question.unlockCost - southWallet.balance)
+
+                        return (
+                          <div
+                            key={question.id}
+                            className={`south-card ${isCompleted ? 'completed' : 'locked'}`}
+                          >
+                            <div className="south-card-header">
+                              <span className="south-card-index">Mật mã #{index + 1}</span>
+                              {isCompleted ? (
+                                <span className="south-badge completed" title="Đã hoàn thành">
+                                  ✓ Đã hoàn thành
+                                </span>
+                              ) : (
+                                <span className="south-badge locked" title="Nội dung đang ẩn">
+                                  🔒 Chưa mở
+                                </span>
+                              )}
+                            </div>
+
+                            <div className="south-card-body">
+                              <div className="south-card-cost">
+                                <span className="cost-label">Giá mở khóa:</span>
+                                <strong className="cost-value">{question.unlockCost} điểm</strong>
+                              </div>
+                              <p className="south-card-status-text">
+                                {isCompleted
+                                  ? 'Mật mã đã hoàn tất. Có thể mua lại để giải lại.'
+                                  : 'Nội dung câu hỏi đang ẩn. Mở khóa để xem câu hỏi và điền từ.'}
+                              </p>
+                            </div>
+
+                            <div className="south-card-footer">
+                              <button
+                                className={isCompleted ? 'secondary-button' : 'primary-button'}
+                                disabled={!canAfford}
+                                onClick={() => requestSouthUnlock(question.id)}
+                                type="button"
+                              >
+                                {isCompleted
+                                  ? `Làm lại (${question.unlockCost} điểm)`
+                                  : `Mở khóa (${question.unlockCost} điểm)`}
+                              </button>
+                              {!canAfford && (
+                                <p className="control-note">Cần thêm {missingPoints} điểm viện trợ từ Miền Bắc.</p>
+                              )}
+                            </div>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  </div>
                 )}
-                {southGame.status === 'answering' && (
-                  <>
-                    <strong>{currentSouthQuestion.prompt}</strong>
+
+                {/* 2. ANSWERING SCREEN */}
+                {southGame.status === 'answering' && currentSouthQuestion && (
+                  <div className="panel-card south-active-question-card">
+                    <div className="south-active-header">
+                      <div>
+                        <span className="eyebrow">Đang giải mật mã #{southGame.context.currentIndex + 1}</span>
+                        <h3 className="south-question-prompt">{currentSouthQuestion.prompt}</h3>
+                      </div>
+                      <button
+                        className="secondary-button south-back-button"
+                        onClick={returnSouthToCards}
+                        type="button"
+                      >
+                        ← Danh sách câu hỏi
+                      </button>
+                    </div>
+
                     <label className="south-answer-field">
-                      <span>Đáp án</span>
+                      <span>Đáp án từng ký tự</span>
                       <SouthAnswerInput
                         answerPattern={currentSouthQuestion.answerPattern ?? []}
                         onChange={setSouthDraftAnswer}
                         value={southDraftAnswer}
                       />
                     </label>
-                    <button
-                      className="primary-button"
-                      disabled={!southDraftAnswer.trim()}
-                      onClick={submitSouthAnswer}
-                      type="button"
-                    >
-                      Gửi câu trả lời
-                    </button>
-                  </>
+
+                    <div className="action-row south-answer-actions">
+                      <button
+                        className="primary-button"
+                        disabled={!southDraftAnswer.trim()}
+                        onClick={submitSouthAnswer}
+                        type="button"
+                      >
+                        Gửi câu trả lời
+                      </button>
+                      <button
+                        className="secondary-button"
+                        onClick={returnSouthToCards}
+                        type="button"
+                      >
+                        Tạm dừng (Ẩn lại)
+                      </button>
+                    </div>
+                    <p className="control-note">
+                      Điểm mở khóa ({currentSouthQuestion.unlockCost} điểm) đã được trừ.
+                    </p>
+                  </div>
                 )}
+
+                {/* 3. FEEDBACK SCREEN */}
                 {southGame.status === 'feedback' && (
-                  <p className={southGame.lastResult.correct ? 'lobby-status ready' : 'lobby-status waiting'}>
-                    {southGame.lastResult.correct ? 'Đáp án chính xác.' : 'Đáp án chưa chính xác.'}
-                  </p>
+                  <div className="panel-card south-feedback-card">
+                    <div className={`feedback-banner ${southGame.lastResult.correct ? 'success' : 'failure'}`}>
+                      <h4>
+                        {southGame.lastResult.correct ? '🎉 Đáp án chính xác!' : '❌ Đáp án chưa chính xác!'}
+                      </h4>
+                      <p>
+                        {southGame.lastResult.correct
+                          ? 'Mật mã này đã được đánh dấu hoàn thành! Điểm mở khóa đã tiêu hao. Câu hỏi sẽ ẩn lại trên màn hình chọn.'
+                          : 'Điểm mở khóa đã bị tiêu hao. Mật mã sẽ được ẩn lại và bạn cần mua lại nếu muốn thử lại.'}
+                      </p>
+                    </div>
+
+                    <div className="action-row host-actions">
+                      <button
+                        className="primary-button"
+                        onClick={returnSouthToCards}
+                        type="button"
+                      >
+                        Quay lại danh sách câu hỏi
+                      </button>
+                    </div>
+                  </div>
                 )}
-                {(southGame.status === 'ready' || southGame.status === 'feedback') && southUnlockQuestion && (
-                  <>
-                    <strong>Câu hỏi đang khóa</strong>
-                    <p>Chi phí mở khóa câu hỏi tiếp theo: {southUnlockQuestion.unlockCost} điểm.</p>
+
+                {/* 4. COMPLETED OR ERROR */}
+                {southGame.status === 'completed' && (
+                  <div className="panel-card south-completed-card">
+                    <h4>Đội Miền Nam đã hoàn thành toàn bộ câu hỏi!</h4>
+                    <p>Chúc mừng hai miền đã phối hợp chi viện và giải mã thành công.</p>
                     <button
-                      className="primary-button"
-                      disabled={southWallet.balance < southUnlockQuestion.unlockCost}
-                      onClick={requestSouthUnlock}
+                      className="secondary-button"
+                      onClick={returnSouthToCards}
                       type="button"
                     >
-                      Mở khóa câu hỏi
+                      Xem lại danh sách câu hỏi
                     </button>
-                    {southWallet.balance < southUnlockQuestion.unlockCost && (
-                      <p className="control-note">Cần thêm {southUnlockQuestion.unlockCost - southWallet.balance} điểm viện trợ từ Miền Bắc.</p>
-                    )}
-                  </>
+                  </div>
                 )}
-                {southGame.status === 'completed' && <p>Đội Miền Nam đã hoàn thành bộ câu hỏi.</p>}
+
                 {southGame.status === 'error' && <p className="form-error">{southGame.message}</p>}
               </div>
             )}
@@ -1268,9 +1449,13 @@ function App() {
                 </div>
                 <span className={`session-state ${southGame?.status ?? 'lobby'}`}>{southGameStatusLabel}</span>
               </div>
+              <div className="question-counter">
+                <span>Điểm viện trợ: {southWallet.balance} điểm</span>
+                <strong>{completedSouthQuestionIds.length} / {southGame?.context.questions.length ?? 0} câu hoàn thành</strong>
+              </div>
               {currentSouthQuestion && (
                 <div className="question-placeholder">
-                  <strong>{currentSouthQuestion.prompt}</strong>
+                  <strong>{currentSouthQuestion.prompt || `Mật mã #${southGame?.context.currentIndex ? southGame.context.currentIndex + 1 : 1} (Đang ẩn)`}</strong>
                   <p>Chi phí mở khóa: {currentSouthQuestion.unlockCost} điểm</p>
                   {southGame?.status === 'feedback' && (
                     <p>
@@ -1282,19 +1467,37 @@ function App() {
               )}
               {southGame?.status === 'error' && <p className="form-error" role="alert">{southGame.message}</p>}
               <div className="action-row host-actions">
-                {southGame?.status === 'feedback' && !southUnlockQuestion && (
+                {southGame?.status === 'feedback' && (
                   <button
                     className="primary-button"
                     onClick={() => {
                       setSouthDraftAnswer('')
-                      dispatchSouthGame({ type: 'NEXT_QUESTION' })
+                      const nextWallet = { ...southWalletRef.current, unlockedQuestionIds: [] }
+                      southWalletRef.current = nextWallet
+                      setSouthWallet(nextWallet)
+                      dispatchSouthGame({ type: 'RETURN_TO_CARDS' })
                     }}
                     type="button"
                   >
-                    Hoàn tất
+                    Về danh sách thẻ câu hỏi
                   </button>
                 )}
                 {southGame?.status === 'completed' && <strong>Miền Nam đã hoàn thành.</strong>}
+              </div>
+              <div className="south-admin-questions-summary">
+                <h4>Danh sách mật mã Miền Nam</h4>
+                <div className="south-admin-card-list">
+                  {southGame?.context.questions.map((q, idx) => {
+                    const isDone = completedSouthQuestionIds.includes(q.id)
+                    const isUnlocked = southWallet.unlockedQuestionIds.includes(q.id)
+                    return (
+                      <div className="player-summary" key={q.id}>
+                        <span>Mật mã #{idx + 1} · Giá: {q.unlockCost} điểm</span>
+                        <strong>{isDone ? '✓ Đã hoàn thành' : isUnlocked ? '🔓 Đang mở' : '🔒 Chưa mở'}</strong>
+                      </div>
+                    )
+                  })}
+                </div>
               </div>
               <p className="control-note">Miền Nam tiến triển độc lập với đồng hồ trắc nghiệm Miền Bắc.</p>
             </section>

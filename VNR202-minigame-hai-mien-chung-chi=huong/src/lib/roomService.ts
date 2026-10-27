@@ -60,6 +60,7 @@ export type SouthWallet = {
   balance: number
   lastAid: number
   unlockedQuestionIds: string[]
+  completedQuestionIds?: string[]
 }
 
 export type RoomMessage = {
@@ -201,4 +202,6 @@ export const loadQuestionAnswerKeys = async (questionIds: string[]): Promise<Ban
 
   if (error) throw error
   return data ?? []
+}
+
 }

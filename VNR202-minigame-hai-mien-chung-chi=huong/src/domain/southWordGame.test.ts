@@ -140,6 +140,45 @@ describe('transitionWordGame', () => {
     expect(transitionWordGame(answering, { type: 'NEXT_QUESTION' })).toBe(answering)
     expect(transitionWordGame(answering, { type: 'RESTART' })).toBe(answering)
   })
+
+  it('allows selecting an arbitrary question by ID and resets draft answer', () => {
+    const readyState = createWordGameState(questions)
+    const selected = transitionWordGame(readyState, { type: 'SELECT_QUESTION', questionId: 'q2' })
+
+    expect(selected.status).toBe('answering')
+    expect(selected.context.currentIndex).toBe(1)
+    expect(selected.context.draftAnswer).toBe('')
+
+    const invalid = transitionWordGame(readyState, { type: 'SELECT_QUESTION', questionId: 'unknown' })
+    expect(invalid).toBe(readyState)
+  })
+
+  it('allows returning to cards view from answering or feedback states', () => {
+    const answering = startGame()
+    const returnedFromAnswering = transitionWordGame(answering, { type: 'RETURN_TO_CARDS' })
+    expect(returnedFromAnswering.status).toBe('ready')
+
+    const feedback = answer(answering, 'Hà Nội')
+    const returnedFromFeedback = transitionWordGame(feedback, { type: 'RETURN_TO_CARDS' })
+    expect(returnedFromFeedback.status).toBe('ready')
+  })
+
+  it('records completedQuestionIds when answer is correct and retains it on wrong answers', () => {
+    const readyState = createWordGameState(questions)
+    const q1State = transitionWordGame(readyState, { type: 'SELECT_QUESTION', questionId: 'q1' })
+    const q1Correct = answer(q1State, 'Hà Nội')
+
+    expect(q1Correct.status).toBe('feedback')
+    expect(q1Correct.context.completedQuestionIds).toContain('q1')
+
+    const backToCards = transitionWordGame(q1Correct, { type: 'RETURN_TO_CARDS' })
+    const q2State = transitionWordGame(backToCards, { type: 'SELECT_QUESTION', questionId: 'q2' })
+    const q2Wrong = answer(q2State, 'Sai Đáp Án')
+
+    expect(q2Wrong.status).toBe('feedback')
+    expect(q2Wrong.context.completedQuestionIds).toContain('q1')
+    expect(q2Wrong.context.completedQuestionIds).not.toContain('q2')
+  })
 })
 
 describe('word game completion calculation', () => {

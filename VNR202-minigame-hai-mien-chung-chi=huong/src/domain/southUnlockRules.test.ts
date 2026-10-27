@@ -61,6 +61,33 @@ describe('canUnlockQuestion', () => {
       sessionActive: true,
     })).toBe(false)
   })
+
+  it('cho phép mua lại (re-purchase) câu hỏi khi câu hỏi đã bị ẩn lại', () => {
+    // Khi câu hỏi đã được ẩn lại (unlockedQuestionIds rỗng), người chơi có thể mua lại để làm lại
+    const repurchaseState: SouthUnlockState = {
+      southTeamPoints: 160,
+      unlockCost: 80,
+      questionId: 'q-1',
+      unlockedQuestionIds: [],
+      sessionActive: true,
+    }
+
+    expect(canUnlockQuestion(repurchaseState)).toBe(true)
+    const firstUnlock = applySouthUnlock(repurchaseState)
+    expect(firstUnlock.allowed).toBe(true)
+    expect(firstUnlock.updatedPoints).toBe(80)
+
+    // Sau khi câu hỏi bị ẩn lại (unlockedQuestionIds reset về rỗng), mua lại lần 2 tiếp tục trừ điểm
+    const secondRepurchase = applySouthUnlock({
+      southTeamPoints: firstUnlock.updatedPoints,
+      unlockCost: 80,
+      questionId: 'q-1',
+      unlockedQuestionIds: [],
+      sessionActive: true,
+    })
+    expect(secondRepurchase.allowed).toBe(true)
+    expect(secondRepurchase.updatedPoints).toBe(0)
+  })
 })
 
 describe('applySouthUnlock', () => {
