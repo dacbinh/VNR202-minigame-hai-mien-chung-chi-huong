@@ -194,6 +194,7 @@ function App() {
   const [northGame, setNorthGame] = useState<NorthGameState | null>(null)
   const [southGame, setSouthGame] = useState<SouthWordGameState | null>(null)
   const [southWallet, setSouthWallet] = useState<SouthWallet>({ balance: 0, lastAid: 0, unlockedQuestionIds: [] })
+  const [aidNotification, setAidNotification] = useState<number | null>(null)
   const [selectedOptionId, setSelectedOptionId] = useState('')
   const [southDraftAnswer, setSouthDraftAnswer] = useState('')
   const [clockNow, setClockNow] = useState(() => Date.now())
@@ -219,6 +220,16 @@ function App() {
     window.addEventListener('hashchange', handleHashChange)
     return () => window.removeEventListener('hashchange', handleHashChange)
   }, [])
+
+  useEffect(() => {
+    if (southWallet.lastAid > 0) {
+      setAidNotification(southWallet.lastAid)
+      const timer = window.setTimeout(() => {
+        setAidNotification(null)
+      }, 2500)
+      return () => window.clearTimeout(timer)
+    }
+  }, [southWallet.balance, southWallet.lastAid])
 
   useEffect(() => () => {
     void closeRoomChannel(hostChannelRef.current)
@@ -1079,8 +1090,8 @@ function App() {
                       <strong>{southWallet.balance} điểm</strong>
                     </div>
                   </div>
-                  {southWallet.lastAid > 0 && (
-                    <p className="lobby-status ready aid-notice">+{southWallet.lastAid} điểm viện trợ vừa chuyển từ Miền Bắc</p>
+                  {aidNotification !== null && (
+                    <p className="lobby-status ready aid-notice">+{aidNotification} điểm viện trợ vừa chuyển từ Miền Bắc</p>
                   )}
                   <div className="south-progress-bar-container">
                     <div className="south-progress-label">
