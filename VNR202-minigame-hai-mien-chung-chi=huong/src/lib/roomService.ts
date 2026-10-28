@@ -65,6 +65,8 @@ export type SouthWallet = {
 
 export type SouthPlayerProgress = {
   game: SouthWordGameState
+  walletBalance: number
+  lastAid: number
   unlockedQuestionIds: string[]
   completedQuestionIds: string[]
 }

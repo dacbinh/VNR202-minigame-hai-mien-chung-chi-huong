@@ -369,6 +369,8 @@ function App() {
       .filter((player) => player.team === 'south')
       .map((player) => [player.profileId, {
         game: nextSouth,
+        walletBalance: 0,
+        lastAid: 0,
         unlockedQuestionIds: [],
         completedQuestionIds: [],
       }])) as Record<string, SouthPlayerProgress>
@@ -485,7 +487,15 @@ function App() {
       const awardedPoints = nextGame.context.answers.find((answer) =>
         answer.playerId === actor.id && answer.questionId === event.questionId)?.pointsAwarded ?? 0
       if (awardedPoints > 0) {
-        updatedWallet = { ...updatedWallet, balance: updatedWallet.balance + awardedPoints, lastAid: awardedPoints }
+        const nextProgress = Object.fromEntries(Object.entries(southPlayerProgressRef.current).map(([playerId, progress]) => [playerId, {
+          ...progress,
+          walletBalance: progress.walletBalance + awardedPoints,
+          lastAid: awardedPoints,
+        }])) as Record<string, SouthPlayerProgress>
+        const newTotalBalance = Object.values(nextProgress).reduce((total, progress) => total + progress.walletBalance, 0)
+        updatedWallet = { ...updatedWallet, balance: newTotalBalance, lastAid: awardedPoints }
+        southPlayerProgressRef.current = nextProgress
+        setSouthPlayerProgress(nextProgress)
         southWalletRef.current = updatedWallet
         setSouthWallet(updatedWallet)
       }
@@ -584,7 +594,7 @@ function App() {
       if (!question) return
 
       const unlock = applySouthUnlock({
-        southTeamPoints: southWalletRef.current.balance,
+        southTeamPoints: playerProgress.walletBalance,
         unlockCost: question.unlockCost,
         questionId: question.id,
         unlockedQuestionIds: playerProgress.unlockedQuestionIds,
@@ -595,13 +605,15 @@ function App() {
       const nextGame = transitionWordGame(currentGame, { type: 'SELECT_QUESTION', questionId: question.id })
       if (nextGame.status !== 'answering') return
 
-      const nextWallet: SouthWallet = { ...southWalletRef.current, balance: unlock.updatedPoints }
       const nextPlayerProgress = {
         ...playerProgress,
         game: nextGame,
+        walletBalance: unlock.updatedPoints,
         unlockedQuestionIds: [...new Set([...playerProgress.unlockedQuestionIds, question.id])],
       }
       const nextProgress = { ...southPlayerProgressRef.current, [message.playerId]: nextPlayerProgress }
+      const newTotalBalance = Object.values(nextProgress).reduce((total, progress) => total + progress.walletBalance, 0)
+      const nextWallet = { ...southWalletRef.current, balance: newTotalBalance }
       southWalletRef.current = nextWallet
       southPlayerProgressRef.current = nextProgress
       setSouthPlayerProgress(nextProgress)
@@ -731,6 +743,8 @@ function App() {
           if (message.state.southWallet) {
             const personalWallet = {
               ...message.state.southWallet,
+              balance: personalProgress.walletBalance,
+              lastAid: personalProgress.lastAid,
               unlockedQuestionIds: personalProgress.unlockedQuestionIds,
               completedQuestionIds: personalProgress.completedQuestionIds,
             }
@@ -1511,7 +1525,7 @@ function App() {
                 <span className={`session-state ${southGame?.status ?? 'lobby'}`}>{southGameStatusLabel}</span>
               </div>
               <div className="question-counter">
-                <span>Điểm viện trợ: {southWallet.balance} điểm</span>
+                <span>Tổng điểm còn trong các ví Miền Nam: {southWallet.balance} điểm</span>
                 <strong>{(southWallet.completedQuestionIds ?? []).length} / {southGame?.context.questions.length ?? 0} mật mã đã giải</strong>
               </div>
               {currentSouthQuestion && (
@@ -1556,7 +1570,7 @@ function App() {
                             <strong>{player.displayName}</strong>
                             <small>{status}{questionIndex ? ` · Mật mã #${questionIndex}` : ''}</small>
                           </span>
-                          <strong>{completedCount}/{totalCount} hoàn thành</strong>
+                          <strong>{progress?.walletBalance ?? 0} điểm · {completedCount}/{totalCount} hoàn thành</strong>
                         </div>
                       )
                     })}
