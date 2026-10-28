@@ -29,6 +29,7 @@ import {
   sendRoomEvent,
   type BankQuestion,
   type RoomMessage,
+  type SouthPlayerProgress,
   type SouthWallet,
 } from './lib/roomService'
 import { hasSupabaseConfig } from './lib/supabase'
@@ -170,6 +171,12 @@ const getPublicQuestionBankSnapshot = (bankQuestions: BankQuestion[], unlockedQu
     ? { ...question, prompt: '', choices: [] }
     : question)
 
+const getPublicSouthPlayerProgress = (progress: Record<string, SouthPlayerProgress>) =>
+  Object.fromEntries(Object.entries(progress).map(([playerId, playerProgress]) => [playerId, {
+    ...playerProgress,
+    game: getPublicSouthGameSnapshot(playerProgress.game, playerProgress.unlockedQuestionIds),
+  }])) as Record<string, SouthPlayerProgress>
+
 const getModeFromHash = (hash: string): AppMode =>
   hash.replace('#', '') === 'admin' ? 'admin' : 'player'
 
@@ -194,6 +201,7 @@ function App() {
   const [northGame, setNorthGame] = useState<NorthGameState | null>(null)
   const [southGame, setSouthGame] = useState<SouthWordGameState | null>(null)
   const [southWallet, setSouthWallet] = useState<SouthWallet>({ balance: 0, lastAid: 0, unlockedQuestionIds: [] })
+  const [southPlayerProgress, setSouthPlayerProgress] = useState<Record<string, SouthPlayerProgress>>({})
   const [aidNotification, setAidNotification] = useState<number | null>(null)
   const [selectedOptionId, setSelectedOptionId] = useState('')
   const [southDraftAnswer, setSouthDraftAnswer] = useState('')
@@ -207,6 +215,7 @@ function App() {
   const northGameRef = useRef<NorthGameState | null>(null)
   const southGameRef = useRef<SouthWordGameState | null>(null)
   const southWalletRef = useRef<SouthWallet>({ balance: 0, lastAid: 0, unlockedQuestionIds: [] })
+  const southPlayerProgressRef = useRef<Record<string, SouthPlayerProgress>>({})
   const answerKeysRef = useRef<Record<string, string>>({})
   const pendingJoinRef = useRef<{
     requestId: string
@@ -275,6 +284,7 @@ function App() {
             southWallet: southWalletRef.current,
             northGame: nextGame,
             southGame: getPublicSouthGameSnapshot(southGameRef.current, southWalletRef.current.unlockedQuestionIds),
+            southPlayerProgress: getPublicSouthPlayerProgress(southPlayerProgressRef.current),
           },
         })
       }
@@ -310,6 +320,7 @@ function App() {
         southWallet: southWalletRef.current,
         northGame: northGameRef.current,
         southGame: getPublicSouthGameSnapshot(southGameRef.current, southWalletRef.current.unlockedQuestionIds),
+        southPlayerProgress: getPublicSouthPlayerProgress(southPlayerProgressRef.current),
         ...overrides,
       },
     })
@@ -354,6 +365,13 @@ function App() {
 
     const nextNorth = transitionNorthGame(northLobby, { type: 'ADMIN_START' }, adminActor)
     const nextSouth = southReady
+    const southProgress = Object.fromEntries(playersRef.current
+      .filter((player) => player.team === 'south')
+      .map((player) => [player.profileId, {
+        game: nextSouth,
+        unlockedQuestionIds: [],
+        completedQuestionIds: [],
+      }])) as Record<string, SouthPlayerProgress>
     const emptyWallet: SouthWallet = {
       balance: 0,
       lastAid: 0,
@@ -361,6 +379,8 @@ function App() {
       completedQuestionIds: [],
     }
     southWalletRef.current = emptyWallet
+    southPlayerProgressRef.current = southProgress
+    setSouthPlayerProgress(southProgress)
     setSouthWallet(emptyWallet)
     northGameRef.current = nextNorth
     southGameRef.current = nextSouth
@@ -372,6 +392,7 @@ function App() {
       northGame: nextNorth,
       southGame: getPublicSouthGameSnapshot(nextSouth, emptyWallet.unlockedQuestionIds),
       southWallet: emptyWallet,
+      southPlayerProgress: getPublicSouthPlayerProgress(southProgress),
       status: 'active',
     })
   }
@@ -517,34 +538,36 @@ function App() {
     if (message.type === 'south-answer' && message.playerId && message.questionId
       && typeof message.answer === 'string'
       && playersRef.current.some((player) => player.profileId === message.playerId && player.team === 'south')) {
-      const currentGame = southGameRef.current
+      const playerProgress = southPlayerProgressRef.current[message.playerId]
+      const currentGame = playerProgress?.game
       const question = currentGame?.status === 'answering'
         ? currentGame.context.questions[currentGame.context.currentIndex]
         : undefined
       if (!currentGame || !question || question.id !== message.questionId) return
-      if (!southWalletRef.current.unlockedQuestionIds.includes(question.id)) return
+      if (!playerProgress.unlockedQuestionIds.includes(question.id)) return
 
       const withDraft = transitionWordGame(currentGame, { type: 'ANSWER_CHANGED', value: message.answer })
       const nextGame = transitionWordGame(withDraft, { type: 'SUBMIT_ANSWER' })
       if (nextGame !== currentGame && nextGame.status === 'feedback') {
-        const isCorrect = nextGame.lastResult.correct
-        const prevCompleted = southWalletRef.current.completedQuestionIds ?? []
-        const nextCompleted = isCorrect && !prevCompleted.includes(question.id)
-          ? [...prevCompleted, question.id]
-          : prevCompleted
-
-        const nextWallet: SouthWallet = {
-          ...southWalletRef.current,
-          completedQuestionIds: nextCompleted,
+        const nextPlayerProgress = {
+          ...playerProgress,
+          game: nextGame,
+          completedQuestionIds: nextGame.lastResult.correct
+            ? [...new Set([...playerProgress.completedQuestionIds, question.id])]
+            : playerProgress.completedQuestionIds,
         }
+        const nextProgress = { ...southPlayerProgressRef.current, [message.playerId]: nextPlayerProgress }
+        const nextCompleted = [...new Set(Object.values(nextProgress).flatMap((item) => item.completedQuestionIds))]
+        const nextWallet = { ...southWalletRef.current, completedQuestionIds: nextCompleted }
+        southPlayerProgressRef.current = nextProgress
+        setSouthPlayerProgress(nextProgress)
         southWalletRef.current = nextWallet
         setSouthWallet(nextWallet)
-        southGameRef.current = nextGame
-        setSouthGame(nextGame)
         void broadcastHostState({
-          southGame: getPublicSouthGameSnapshot(nextGame, southWalletRef.current.unlockedQuestionIds),
+          southPlayerProgress: getPublicSouthPlayerProgress(nextProgress),
           southWallet: nextWallet,
-          status: northGameRef.current?.status === 'question_active' ? 'active' : 'waiting',
+          status: northGameRef.current?.status === 'question_active'
+            || Object.values(nextProgress).some((item) => item.game.status === 'answering') ? 'active' : 'waiting',
         })
       }
       return
@@ -553,7 +576,8 @@ function App() {
     if (message.type === 'south-unlock' && message.playerId && message.questionId
       && message.requestId
       && playersRef.current.some((player) => player.profileId === message.playerId && player.team === 'south')) {
-      const currentGame = southGameRef.current
+      const playerProgress = southPlayerProgressRef.current[message.playerId]
+      const currentGame = playerProgress?.game
       if (!currentGame) return
 
       const question = currentGame.context.questions.find((q) => q.id === message.questionId)
@@ -563,7 +587,7 @@ function App() {
         southTeamPoints: southWalletRef.current.balance,
         unlockCost: question.unlockCost,
         questionId: question.id,
-        unlockedQuestionIds: southWalletRef.current.unlockedQuestionIds,
+        unlockedQuestionIds: playerProgress.unlockedQuestionIds,
         sessionActive: true,
       })
       if (!unlock.allowed) return
@@ -571,17 +595,19 @@ function App() {
       const nextGame = transitionWordGame(currentGame, { type: 'SELECT_QUESTION', questionId: question.id })
       if (nextGame.status !== 'answering') return
 
-      const nextWallet: SouthWallet = {
-        ...southWalletRef.current,
-        balance: unlock.updatedPoints,
-        unlockedQuestionIds: [question.id],
+      const nextWallet: SouthWallet = { ...southWalletRef.current, balance: unlock.updatedPoints }
+      const nextPlayerProgress = {
+        ...playerProgress,
+        game: nextGame,
+        unlockedQuestionIds: [...new Set([...playerProgress.unlockedQuestionIds, question.id])],
       }
+      const nextProgress = { ...southPlayerProgressRef.current, [message.playerId]: nextPlayerProgress }
       southWalletRef.current = nextWallet
+      southPlayerProgressRef.current = nextProgress
+      setSouthPlayerProgress(nextProgress)
       setSouthWallet(nextWallet)
-      southGameRef.current = nextGame
-      setSouthGame(nextGame)
       void broadcastHostState({
-        southGame: getPublicSouthGameSnapshot(nextGame, nextWallet.unlockedQuestionIds),
+        southPlayerProgress: getPublicSouthPlayerProgress(nextProgress),
         southWallet: nextWallet,
         status: northGameRef.current?.status === 'question_active' ? 'active' : 'waiting',
       })
@@ -590,21 +616,17 @@ function App() {
 
     if (message.type === 'south-return-cards' && message.playerId
       && playersRef.current.some((player) => player.profileId === message.playerId && player.team === 'south')) {
-      const currentGame = southGameRef.current
+      const playerProgress = southPlayerProgressRef.current[message.playerId]
+      const currentGame = playerProgress?.game
       if (!currentGame) return
 
       const nextGame = transitionWordGame(currentGame, { type: 'RETURN_TO_CARDS' })
-      const nextWallet: SouthWallet = {
-        ...southWalletRef.current,
-        unlockedQuestionIds: [],
-      }
-      southWalletRef.current = nextWallet
-      setSouthWallet(nextWallet)
-      southGameRef.current = nextGame
-      setSouthGame(nextGame)
+      const nextPlayerProgress = { ...playerProgress, game: nextGame, unlockedQuestionIds: [] }
+      const nextProgress = { ...southPlayerProgressRef.current, [message.playerId]: nextPlayerProgress }
+      southPlayerProgressRef.current = nextProgress
+      setSouthPlayerProgress(nextProgress)
       void broadcastHostState({
-        southGame: getPublicSouthGameSnapshot(nextGame, []),
-        southWallet: nextWallet,
+        southPlayerProgress: getPublicSouthPlayerProgress(nextProgress),
         status: northGameRef.current?.status === 'question_active' ? 'active' : 'waiting',
       })
       return
@@ -699,9 +721,29 @@ function App() {
         southGameRef.current = message.state.southGame
         setSouthGame(message.state.southGame)
       }
+      if (message.state.southPlayerProgress !== undefined) {
+        const progress = message.state.southPlayerProgress
+        setSouthPlayerProgress(progress)
+        const personalProgress = pendingPlayer ? progress[pendingPlayer.profileId] : undefined
+        if (personalProgress) {
+          southGameRef.current = personalProgress.game
+          setSouthGame(personalProgress.game)
+          if (message.state.southWallet) {
+            const personalWallet = {
+              ...message.state.southWallet,
+              unlockedQuestionIds: personalProgress.unlockedQuestionIds,
+              completedQuestionIds: personalProgress.completedQuestionIds,
+            }
+            southWalletRef.current = personalWallet
+            setSouthWallet(personalWallet)
+          }
+        }
+      }
       if (message.state.southWallet) {
-        southWalletRef.current = message.state.southWallet
-        setSouthWallet(message.state.southWallet)
+        if (!pendingPlayer || pendingPlayer.team !== 'south' || !message.state.southPlayerProgress) {
+          southWalletRef.current = message.state.southWallet
+          setSouthWallet(message.state.southWallet)
+        }
       }
     }
 
@@ -816,6 +858,8 @@ function App() {
       setNorthGame(null)
       southGameRef.current = null
       setSouthGame(null)
+      southPlayerProgressRef.current = {}
+      setSouthPlayerProgress({})
       const emptyWallet: SouthWallet = { balance: 0, lastAid: 0, unlockedQuestionIds: [] }
       southWalletRef.current = emptyWallet
       setSouthWallet(emptyWallet)
@@ -842,7 +886,13 @@ function App() {
   const southCount = getTeamMemberCount(players, 'south')
   const currentNorthQuestion = northGame?.context.questions[northGame.context.currentIndex]
   const currentSouthQuestion = southGame?.context.questions[southGame.context.currentIndex]
-  const completedSouthQuestionIds = southWallet.completedQuestionIds ?? southGame?.context.completedQuestionIds ?? []
+  const personalSouthProgress = pendingPlayer?.team === 'south'
+    ? southPlayerProgress[pendingPlayer.profileId]
+    : undefined
+  const completedSouthQuestionIds = personalSouthProgress?.completedQuestionIds
+    ?? southWallet.completedQuestionIds
+    ?? southGame?.context.completedQuestionIds
+    ?? []
   const correctNorthOptionId = currentNorthQuestion
     ? currentNorthQuestion.options.find((option) =>
         isNorthOptionCorrect(option.text, answerKeys[currentNorthQuestion.id] ?? ''),
@@ -874,14 +924,14 @@ function App() {
             : northGame?.status === 'error'
               ? 'Cần kiểm tra'
               : 'Sảnh chờ'
-  const southGameStatusLabel = southGame?.status === 'answering'
+  const southGameStatusLabel = Object.values(southPlayerProgress).some((progress) => progress.game.status === 'answering')
     ? 'Câu hỏi đang mở'
-    : southGame?.status === 'feedback'
+    : Object.values(southPlayerProgress).some((progress) => progress.game.status === 'feedback')
       ? 'Đã nhận câu trả lời'
+      : Object.values(southPlayerProgress).length > 0 && Object.values(southPlayerProgress).every((progress) => progress.game.status === 'completed')
+        ? 'Đã hoàn thành'
       : southGame?.status === 'ready'
         ? 'Chọn câu hỏi'
-      : southGame?.status === 'completed'
-        ? 'Đã hoàn thành'
         : southGame?.status === 'error'
           ? 'Cần kiểm tra'
           : 'Sảnh chờ'
@@ -1462,7 +1512,7 @@ function App() {
               </div>
               <div className="question-counter">
                 <span>Điểm viện trợ: {southWallet.balance} điểm</span>
-                <strong>{completedSouthQuestionIds.length} / {southGame?.context.questions.length ?? 0} câu hoàn thành</strong>
+                <strong>{(southWallet.completedQuestionIds ?? []).length} / {southGame?.context.questions.length ?? 0} mật mã đã giải</strong>
               </div>
               {currentSouthQuestion && (
                 <div className="question-placeholder">
@@ -1477,6 +1527,44 @@ function App() {
                 </div>
               )}
               {southGame?.status === 'error' && <p className="form-error" role="alert">{southGame.message}</p>}
+              <div className="south-admin-questions-summary">
+                <h4>Tiến độ từng người chơi Miền Nam</h4>
+                {players.filter((player) => player.team === 'south').length > 0 ? (
+                  <div className="south-admin-card-list">
+                    {players.filter((player) => player.team === 'south').map((player) => {
+                      const progress = southPlayerProgress[player.profileId]
+                      const game = progress?.game
+                      const currentQuestion = game?.context.questions[game.context.currentIndex]
+                      const completedCount = progress?.completedQuestionIds.length ?? 0
+                      const totalCount = game?.context.questions.length ?? southGame?.context.questions.length ?? 0
+                      const status = totalCount > 0 && completedCount >= totalCount
+                        ? 'Hoàn thành'
+                        : game?.status === 'answering'
+                        ? 'Đang giải'
+                        : game?.status === 'feedback'
+                          ? game.lastResult.correct ? 'Đã trả lời đúng' : 'Đã trả lời sai'
+                            : game?.status === 'ready'
+                              ? 'Đang chọn câu'
+                              : 'Chưa bắt đầu'
+                      const questionIndex = currentQuestion
+                        ? (game?.context.questions.findIndex((question) => question.id === currentQuestion.id) ?? -1) + 1
+                        : 0
+
+                      return (
+                        <div className="player-summary south-player-progress-row" key={player.profileId}>
+                          <span>
+                            <strong>{player.displayName}</strong>
+                            <small>{status}{questionIndex ? ` · Mật mã #${questionIndex}` : ''}</small>
+                          </span>
+                          <strong>{completedCount}/{totalCount} hoàn thành</strong>
+                        </div>
+                      )
+                    })}
+                  </div>
+                ) : (
+                  <p className="empty-team">Chưa có người chơi Miền Nam</p>
+                )}
+              </div>
               <div className="action-row host-actions">
                 {southGame?.status === 'feedback' && (
                   <button

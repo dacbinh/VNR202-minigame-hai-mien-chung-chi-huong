@@ -632,6 +632,26 @@ label input::placeholder {
   color: var(--color-jade);
 }
 
+.south-player-progress-row {
+  align-items: center;
+}
+
+.south-player-progress-row > span {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.south-player-progress-row small {
+  color: var(--color-text-muted);
+  font-size: 0.85rem;
+}
+
+.south-player-progress-row > strong {
+  flex-shrink: 0;
+  text-align: right;
+}
+
 .admin-dashboard {
   display: grid;
   grid-template-columns: minmax(0, 1fr);

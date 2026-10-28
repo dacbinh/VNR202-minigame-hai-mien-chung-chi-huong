@@ -63,6 +63,12 @@ export type SouthWallet = {
   completedQuestionIds?: string[]
 }
 
+export type SouthPlayerProgress = {
+  game: SouthWordGameState
+  unlockedQuestionIds: string[]
+  completedQuestionIds: string[]
+}
+
 export type RoomMessage = {
   type: string
   requestId?: string
@@ -76,6 +82,7 @@ export type RoomMessage = {
     southWallet?: SouthWallet
     northGame?: NorthGameState | null
     southGame?: SouthWordGameState | null
+    southPlayerProgress?: Record<string, SouthPlayerProgress>
   }
   playerId?: string
   questionId?: string
