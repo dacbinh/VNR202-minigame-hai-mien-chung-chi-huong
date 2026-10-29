@@ -177,6 +177,11 @@ const getPublicSouthPlayerProgress = (progress: Record<string, SouthPlayerProgre
     game: getPublicSouthGameSnapshot(playerProgress.game, playerProgress.unlockedQuestionIds),
   }])) as Record<string, SouthPlayerProgress>
 
+const isNorthSupportPhaseComplete = (game: NorthGameState | null) =>
+  game?.status === 'completed'
+  && game.context.questions.length > 0
+  && game.context.resolutions.length >= game.context.questions.length
+
 const getModeFromHash = (hash: string): AppMode =>
   hash.replace('#', '') === 'admin' ? 'admin' : 'player'
 
@@ -605,12 +610,14 @@ function App() {
       const question = currentGame.context.questions.find((q) => q.id === message.questionId)
       if (!question) return
 
+      const rushMode = isNorthSupportPhaseComplete(northGameRef.current)
       const unlock = applySouthUnlock({
         southTeamPoints: playerProgress.walletBalance,
-        unlockCost: question.unlockCost,
+        unlockCost: rushMode ? 0 : question.unlockCost,
         questionId: question.id,
         unlockedQuestionIds: playerProgress.unlockedQuestionIds,
         sessionActive: true,
+        isRushMode: rushMode,
       })
       if (!unlock.allowed) return
 
@@ -935,6 +942,7 @@ function App() {
   const canConfigureQuestionLimits = !northGame || northGame.status === 'lobby' || northGame.status === 'error'
   const currentNorthQuestion = northGame?.context.questions[northGame.context.currentIndex]
   const currentSouthQuestion = southGame?.context.questions[southGame.context.currentIndex]
+  const isSouthRushMode = isNorthSupportPhaseComplete(northGame)
   const personalSouthProgress = pendingPlayer?.team === 'south'
     ? southPlayerProgress[pendingPlayer.profileId]
     : undefined
@@ -1227,11 +1235,17 @@ function App() {
                       <p className="section-kicker">Mặt trận Miền Nam — Tiền tuyến</p>
                       <h3>Giải mã mật mã</h3>
                     </div>
-                    <div className="south-points-badge">
-                      <span>Điểm viện trợ Miền Bắc</span>
+                    <div className={`south-points-badge ${isSouthRushMode ? 'rush-mode' : ''}`}>
+                      <span>{isSouthRushMode ? 'Giai đoạn cao trào kháng chiến' : 'Điểm viện trợ Miền Bắc'}</span>
                       <strong>{southWallet.balance} điểm</strong>
                     </div>
                   </div>
+                  {isSouthRushMode && (
+                    <p className="rush-mode-banner" role="status">
+                      <strong>Giai đoạn cao trào kháng chiến</strong>
+                      Miền Bắc đã hoàn tất nhiệm vụ tiếp sức. Mở khóa mọi mật mã miễn phí từ giờ trở đi.
+                    </p>
+                  )}
                   {aidNotification !== null && (
                     <p className="lobby-status ready aid-notice">+{aidNotification} điểm viện trợ vừa chuyển từ Miền Bắc</p>
                   )}
@@ -1262,8 +1276,9 @@ function App() {
                     <div className="south-cards-grid">
                       {southGame.context.questions.map((question, index) => {
                         const isCompleted = completedSouthQuestionIds.includes(question.id)
-                        const canAfford = southWallet.balance >= question.unlockCost
-                        const missingPoints = Math.max(0, question.unlockCost - southWallet.balance)
+                        const unlockCost = isSouthRushMode ? 0 : question.unlockCost
+                        const canAfford = southWallet.balance >= unlockCost
+                        const missingPoints = Math.max(0, unlockCost - southWallet.balance)
 
                         return (
                           <div
@@ -1285,13 +1300,17 @@ function App() {
 
                             <div className="south-card-body">
                               <div className="south-card-cost">
-                                <span className="cost-label">Giá mở khóa:</span>
-                                <strong className="cost-value">{question.unlockCost} điểm</strong>
+                                <span className="cost-label">{isSouthRushMode ? 'Mở khóa cao trào:' : 'Giá mở khóa:'}</span>
+                                <strong className={`cost-value ${isSouthRushMode ? 'rush-cost' : ''}`}>
+                                  {isSouthRushMode ? 'Miễn phí' : `${question.unlockCost} điểm`}
+                                </strong>
                               </div>
                               <p className="south-card-status-text">
                                 {isCompleted
                                   ? 'Mật mã đã hoàn tất. Có thể mua lại để giải lại.'
-                                  : 'Nội dung câu hỏi đang ẩn. Mở khóa để xem câu hỏi và điền từ.'}
+                                  : isSouthRushMode
+                                    ? 'Mở khóa miễn phí trong giai đoạn cao trào để tiếp tục giải mật mã.'
+                                    : 'Nội dung câu hỏi đang ẩn. Mở khóa để xem câu hỏi và điền từ.'}
                               </p>
                             </div>
 
@@ -1303,8 +1322,8 @@ function App() {
                                 type="button"
                               >
                                 {isCompleted
-                                  ? `Làm lại (${question.unlockCost} điểm)`
-                                  : `Mở khóa (${question.unlockCost} điểm)`}
+                                  ? isSouthRushMode ? 'Làm lại miễn phí' : `Làm lại (${question.unlockCost} điểm)`
+                                  : isSouthRushMode ? 'Mở khóa miễn phí' : `Mở khóa (${question.unlockCost} điểm)`}
                               </button>
                               {!canAfford && (
                                 <p className="control-note">Cần thêm {missingPoints} điểm viện trợ từ Miền Bắc.</p>
@@ -1361,7 +1380,9 @@ function App() {
                       </button>
                     </div>
                     <p className="control-note">
-                      Điểm mở khóa ({currentSouthQuestion.unlockCost} điểm) đã được trừ.
+                      {isSouthRushMode
+                        ? 'Mật mã được mở miễn phí trong giai đoạn cao trào kháng chiến.'
+                        : `Điểm mở khóa (${currentSouthQuestion.unlockCost} điểm) đã được trừ.`}
                     </p>
                   </div>
                 )}

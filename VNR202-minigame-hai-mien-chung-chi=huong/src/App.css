@@ -1106,6 +1106,34 @@ label input.south-answer-symbol:focus-visible {
   font-family: var(--font-display);
 }
 
+.south-points-badge.rush-mode {
+  border-color: #d0a52d;
+  background: #fff1b8;
+  box-shadow: 0 0 0 3px rgba(208, 165, 45, 0.18), 0 0 18px rgba(208, 165, 45, 0.22);
+}
+
+.south-points-badge.rush-mode span,
+.south-points-badge.rush-mode strong {
+  color: #765500;
+}
+
+.rush-mode-banner {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  margin: 0;
+  padding: 0.7rem 0.9rem;
+  border: 1px solid #e2c45f;
+  border-left: 4px solid #d0a52d;
+  border-radius: 4px;
+  background: #fff8dc;
+  color: #624a0a;
+}
+
+.rush-cost {
+  color: #765500;
+}
+
 .aid-notice {
   margin: 0;
   padding: 0.4rem 0.8rem;
