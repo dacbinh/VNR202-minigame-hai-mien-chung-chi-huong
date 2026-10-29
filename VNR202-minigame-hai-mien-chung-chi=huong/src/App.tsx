@@ -197,6 +197,8 @@ function App() {
   const [players, setPlayers] = useState<LobbyMember[]>([])
   const [sessionStatus, setSessionStatus] = useState<SessionStatus>('waiting')
   const [questions, setQuestions] = useState<BankQuestion[]>([])
+  const [northQuestionLimit, setNorthQuestionLimit] = useState(1)
+  const [southQuestionLimit, setSouthQuestionLimit] = useState(1)
   const [answerKeys, setAnswerKeys] = useState<Record<string, string>>({})
   const [northGame, setNorthGame] = useState<NorthGameState | null>(null)
   const [southGame, setSouthGame] = useState<SouthWordGameState | null>(null)
@@ -328,8 +330,17 @@ function App() {
   }
 
   const startBothGames = () => {
-    const northQuestions = getNorthMultipleChoiceQuestions(questionsRef.current)
-    const southQuestions = getSouthWordQuestions(questionsRef.current, answerKeysRef.current)
+    const availableNorthQuestions = getNorthMultipleChoiceQuestions(questionsRef.current)
+    const availableSouthQuestions = getSouthWordQuestions(questionsRef.current, answerKeysRef.current)
+    if (!Number.isInteger(northQuestionLimit) || northQuestionLimit < 1
+      || northQuestionLimit > availableNorthQuestions.length
+      || !Number.isInteger(southQuestionLimit) || southQuestionLimit < 1
+      || southQuestionLimit > availableSouthQuestions.length) {
+      setAdminError('Số câu hỏi mỗi đội phải từ 1 đến số câu đang có trong ngân hàng.')
+      return
+    }
+    const northQuestions = availableNorthQuestions.slice(0, northQuestionLimit)
+    const southQuestions = availableSouthQuestions.slice(0, southQuestionLimit)
     const missingAnswer = [...northQuestions, ...southQuestions].some((question) => {
       const answer = answerKeysRef.current[question.id]
       return !answer || ('options' in question
@@ -872,6 +883,8 @@ function App() {
       playerChannelRef.current = null
 
       const bankQuestions = await loadQuestionBank()
+      setNorthQuestionLimit(getNorthMultipleChoiceQuestions(bankQuestions).length)
+      setSouthQuestionLimit(getSouthWordQuestions(bankQuestions, {}).length)
       const answerQuestionIds = bankQuestions
         .filter((question) =>
           question.owner_team === 'north' && question.kind === 'multiple_choice'
@@ -917,6 +930,9 @@ function App() {
 
   const northCount = getTeamMemberCount(players, 'north')
   const southCount = getTeamMemberCount(players, 'south')
+  const availableNorthQuestionCount = getNorthMultipleChoiceQuestions(questions).length
+  const availableSouthQuestionCount = getSouthWordQuestions(questions, answerKeys).length
+  const canConfigureQuestionLimits = !northGame || northGame.status === 'lobby' || northGame.status === 'error'
   const currentNorthQuestion = northGame?.context.questions[northGame.context.currentIndex]
   const currentSouthQuestion = southGame?.context.questions[southGame.context.currentIndex]
   const personalSouthProgress = pendingPlayer?.team === 'south'
@@ -926,6 +942,13 @@ function App() {
     ?? southWallet.completedQuestionIds
     ?? southGame?.context.completedQuestionIds
     ?? []
+  const southPlayerCompletedGame = Boolean(personalSouthProgress
+    && personalSouthProgress.game.context.questions.length > 0
+    && personalSouthProgress.game.context.questions.every((question) =>
+      personalSouthProgress.completedQuestionIds.includes(question.id)))
+  const northPlayersCompletedGame = Boolean(northGame?.status === 'completed'
+    && northGame.context.questions.length > 0
+    && northGame.context.resolutions.length >= northGame.context.questions.length)
   const correctNorthOptionId = currentNorthQuestion
     ? currentNorthQuestion.options.find((option) =>
         isNorthOptionCorrect(option.text, answerKeys[currentNorthQuestion.id] ?? ''),
@@ -1103,6 +1126,21 @@ function App() {
               <strong>{teamNames[pendingPlayer.team]}</strong>
             </div>
             {pendingPlayer.team === 'north' && northGame && (
+              northPlayersCompletedGame ? (
+                <div className="endgame-panel north-endgame" role="status" aria-live="polite">
+                  <span className="endgame-mark" aria-hidden="true">✓</span>
+                  <p className="section-kicker">Chiến dịch hoàn tất</p>
+                  <h3>Miền Bắc đã hoàn thành ngân hàng câu hỏi</h3>
+                  <p>
+                    Bạn đã cùng đồng đội hoàn tất phần trắc nghiệm và gửi điểm viện trợ cho Miền Nam.
+                    Hai miền đã phối hợp hoàn thành trận đấu.
+                  </p>
+                  <div className="endgame-stats">
+                    <span><strong>{northGame.context.questions.length}</strong> câu đã hoàn tất</span>
+                    <span><strong>{northGame.context.scores[pendingPlayer.profileId] ?? 0}</strong> điểm viện trợ của bạn</span>
+                  </div>
+                </div>
+              ) : (
               <div className="question-placeholder north-question-view">
                 {northGame.status === 'question_active' && currentNorthQuestion && (
                   <>
@@ -1156,11 +1194,27 @@ function App() {
                   <p>Câu tiếp theo sau {Math.max(0, Math.ceil(remainingMs / 1000))} giây.</p>
                 )}
                 {northGame.status === 'paused' && <p>Trận đấu đang tạm dừng.</p>}
-                {northGame.status === 'completed' && <p>Trận đấu đã kết thúc.</p>}
+                {northGame.status === 'completed' && <p>Ngân hàng câu hỏi đã kết thúc.</p>}
                 <p>Điểm của bạn: {northGame.context.scores[pendingPlayer.profileId] ?? 0}</p>
               </div>
+              )
             )}
             {pendingPlayer.team === 'south' && southGame && (
+              southPlayerCompletedGame ? (
+                <div className="endgame-panel south-endgame" role="status" aria-live="polite">
+                  <span className="endgame-mark" aria-hidden="true">✓</span>
+                  <p className="section-kicker">Chiến dịch hoàn tất</p>
+                  <h3>Bạn đã giải mã toàn bộ mật mã Miền Nam</h3>
+                  <p>
+                    Bạn đã hoàn thành tất cả {southGame.context.questions.length} câu hỏi.
+                    Miền Bắc đã tiếp sức để hai miền cùng khép lại trận đấu.
+                  </p>
+                  <div className="endgame-stats">
+                    <span><strong>{completedSouthQuestionIds.length}/{southGame.context.questions.length}</strong> mật mã đã giải</span>
+                    <span><strong>{southWallet.balance}</strong> điểm còn lại</span>
+                  </div>
+                </div>
+              ) : (
               <div className="south-player-container">
                 <div className="south-hud panel-card">
                   <div className="south-hud-row">
@@ -1350,6 +1404,7 @@ function App() {
 
                 {southGame.status === 'error' && <p className="form-error">{southGame.message}</p>}
               </div>
+              )
             )}
           </section>
         )}
@@ -1435,10 +1490,24 @@ function App() {
                 </div>
                 <span className={`session-state ${northGame?.status ?? 'lobby'}`}>{northGameStatusLabel}</span>
               </div>
+              <label className="question-count-control">
+                <span>Số câu trắc nghiệm Miền Bắc</span>
+                <select
+                  disabled={!canConfigureQuestionLimits || availableNorthQuestionCount === 0}
+                  onChange={(event) => setNorthQuestionLimit(Number(event.target.value))}
+                  value={availableNorthQuestionCount === 0 ? '' : northQuestionLimit}
+                >
+                  {availableNorthQuestionCount === 0
+                    ? <option value="">Chưa có câu hỏi</option>
+                    : Array.from({ length: availableNorthQuestionCount }, (_, index) => index + 1)
+                      .map((count) => <option key={count} value={count}>{count} câu</option>)}
+                </select>
+                <small>Tối đa {availableNorthQuestionCount} câu đang có trong ngân hàng.</small>
+              </label>
               <div className="question-counter">
                 <span>{northGame && northGame.status !== 'lobby' && northGame.context.questions.length > 0
                   ? `Câu ${northGame.context.currentIndex + 1} / ${northGame.context.questions.length}`
-                  : `${getNorthMultipleChoiceQuestions(questions).length} câu trắc nghiệm Miền Bắc`}</span>
+                  : `${northQuestionLimit} / ${availableNorthQuestionCount} câu trắc nghiệm sẽ được chọn`}</span>
                 <strong>{northGame?.status === 'question_active'
                   ? `${Math.max(0, Math.ceil(remainingMs / 1000))} giây`
                   : northGame?.status === 'intermission'
@@ -1543,6 +1612,20 @@ function App() {
                 </div>
                 <span className={`session-state ${southGame?.status ?? 'lobby'}`}>{southGameStatusLabel}</span>
               </div>
+              <label className="question-count-control">
+                <span>Số mật mã Miền Nam</span>
+                <select
+                  disabled={!canConfigureQuestionLimits || availableSouthQuestionCount === 0}
+                  onChange={(event) => setSouthQuestionLimit(Number(event.target.value))}
+                  value={availableSouthQuestionCount === 0 ? '' : southQuestionLimit}
+                >
+                  {availableSouthQuestionCount === 0
+                    ? <option value="">Chưa có câu hỏi</option>
+                    : Array.from({ length: availableSouthQuestionCount }, (_, index) => index + 1)
+                      .map((count) => <option key={count} value={count}>{count} câu</option>)}
+                </select>
+                <small>Tối đa {availableSouthQuestionCount} câu đang có trong ngân hàng.</small>
+              </label>
               <div className="question-counter">
                 <span>Tổng điểm còn trong các ví Miền Nam: {southWallet.balance} điểm</span>
                 <strong>{(southWallet.completedQuestionIds ?? []).length} / {southGame?.context.questions.length ?? 0} mật mã đã giải</strong>
