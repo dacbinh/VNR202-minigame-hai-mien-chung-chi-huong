@@ -721,7 +721,10 @@ function App() {
         northGameRef.current = message.state.northGame
         setNorthGame(message.state.northGame)
       }
-      if (message.state.southGame !== undefined) {
+      const currentPlayer = pendingPlayerRef.current
+      const hasPersonalSouthProgress = currentPlayer?.team === 'south'
+        && message.state.southPlayerProgress !== undefined
+      if (message.state.southGame !== undefined && !hasPersonalSouthProgress) {
         const currentGame = southGameRef.current
         if (message.state.southGame?.status === 'answering'
           && (!currentGame || currentGame.status !== 'answering'
@@ -737,9 +740,18 @@ function App() {
       if (message.state.southPlayerProgress !== undefined) {
         const progress = message.state.southPlayerProgress
         setSouthPlayerProgress(progress)
-        const currentPlayer = pendingPlayerRef.current
         const personalProgress = currentPlayer ? progress[currentPlayer.profileId] : undefined
         if (personalProgress) {
+          const currentGame = southGameRef.current
+          const nextGame = personalProgress.game
+          if (nextGame.status === 'answering'
+            && (!currentGame || currentGame.status !== 'answering'
+              || nextGame.context.currentIndex !== currentGame.context.currentIndex)) {
+            setSouthDraftAnswer('')
+          }
+          if (nextGame.status === 'ready' && currentGame?.status !== 'ready') {
+            setSouthDraftAnswer('')
+          }
           southGameRef.current = personalProgress.game
           setSouthGame(personalProgress.game)
           if (message.state.southWallet) {
