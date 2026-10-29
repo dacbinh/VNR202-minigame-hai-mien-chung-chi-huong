@@ -209,6 +209,7 @@ function App() {
   const hostChannelRef = useRef<RealtimeChannel | null>(null)
   const playerChannelRef = useRef<RealtimeChannel | null>(null)
   const playersRef = useRef<LobbyMember[]>([])
+  const pendingPlayerRef = useRef<LobbyMember | null>(null)
   const sessionStatusRef = useRef<SessionStatus>('waiting')
   const questionNumberRef = useRef(1)
   const questionsRef = useRef<BankQuestion[]>([])
@@ -736,7 +737,8 @@ function App() {
       if (message.state.southPlayerProgress !== undefined) {
         const progress = message.state.southPlayerProgress
         setSouthPlayerProgress(progress)
-        const personalProgress = pendingPlayer ? progress[pendingPlayer.profileId] : undefined
+        const currentPlayer = pendingPlayerRef.current
+        const personalProgress = currentPlayer ? progress[currentPlayer.profileId] : undefined
         if (personalProgress) {
           southGameRef.current = personalProgress.game
           setSouthGame(personalProgress.game)
@@ -754,7 +756,8 @@ function App() {
         }
       }
       if (message.state.southWallet) {
-        if (!pendingPlayer || pendingPlayer.team !== 'south' || !message.state.southPlayerProgress) {
+        const currentPlayer = pendingPlayerRef.current
+        if (!currentPlayer || currentPlayer.team !== 'south' || !message.state.southPlayerProgress) {
           southWalletRef.current = message.state.southWallet
           setSouthWallet(message.state.southWallet)
         }
@@ -787,12 +790,14 @@ function App() {
       const connection = await connectPlayerToRoom(normalizedCode, handlePlayerMessage)
       playerChannelRef.current = connection.channel
       setCreatedRoomCode(connection.roomCode)
-      setPendingPlayer({
+      const nextPendingPlayer = {
         profileId: globalThis.crypto.randomUUID(),
         displayName: playerName.trim(),
         team: 'north',
         isAdmin: false,
-      })
+      } satisfies LobbyMember
+      pendingPlayerRef.current = nextPendingPlayer
+      setPendingPlayer(nextPendingPlayer)
       setPlayerStep('team')
     } catch (error) {
       setJoinError(getRoomServiceErrorMessage(error, 'Không tìm thấy phòng đang mở với mã này.'))
@@ -835,6 +840,7 @@ function App() {
       })
 
       const joinedPlayer = { ...pendingPlayer, team }
+      pendingPlayerRef.current = joinedPlayer
       setPendingPlayer(joinedPlayer)
       setPlayerStep('waiting')
     } catch (error) {
@@ -887,6 +893,7 @@ function App() {
       setPlayers([])
       setSessionStatus('waiting')
       setPlayerStep('join')
+      pendingPlayerRef.current = null
       setPendingPlayer(null)
       await broadcastHostState()
     } catch (error) {
