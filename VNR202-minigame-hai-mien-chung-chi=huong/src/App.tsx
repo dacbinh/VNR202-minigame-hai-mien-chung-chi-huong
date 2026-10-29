@@ -1102,7 +1102,12 @@ function App() {
                 >
                   <span className="team-mark" aria-hidden="true">{team === 'north' ? 'B' : 'N'}</span>
                   <strong>{teamNames[team]}</strong>
-                  <span>Chọn đội này</span>
+                  <span className="team-task-description">
+                    {team === 'north'
+                      ? 'Trả lời câu hỏi trắc nghiệm lịch sử. Mỗi câu đúng gửi điểm viện trợ cho Miền Nam.'
+                      : 'Dùng điểm trong ví cá nhân để mở khóa mật mã, rồi tự giải bằng câu trả lời điền từ.'}
+                  </span>
+                  <span className="team-choice-cta">Chọn đội này</span>
                 </button>
               ))}
             </div>

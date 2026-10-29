@@ -533,7 +533,7 @@ label input::placeholder {
 }
 
 .team-choice {
-  min-height: 180px;
+  min-height: 230px;
   display: flex;
   flex-direction: column;
   align-items: flex-start;
@@ -581,9 +581,26 @@ label input::placeholder {
   font-size: 1.35rem;
 }
 
-.team-choice > span:last-child {
+.team-task-description {
   color: var(--color-text-muted);
+  font-size: 0.92rem;
+  line-height: 1.45;
+}
+
+.team-choice-cta {
+  margin-top: 0.15rem;
+  color: var(--color-jade);
   font-size: 0.9rem;
+  font-weight: 700;
+}
+
+.team-choice.south .team-choice-cta {
+  color: var(--color-lacquer-dark);
+}
+
+.team-choice:disabled {
+  cursor: wait;
+  opacity: 0.72;
 }
 
 .waiting-card {
